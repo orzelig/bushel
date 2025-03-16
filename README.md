@@ -116,8 +116,9 @@ For the security of your VM, change the default password `lume` immediately afte
 
 | Image | Tag | Description | Size |
 |-------|------------|-------------|------|
-| `macos-sequoia-vanilla` | `latest`, `15.2` | macOS Sequoia 15.2 | 40GB |
-| `macos-sequoia-xcode` | `latest`, `15.2` | macOS Sequoia 15.2 with Xcode command line tools | 50GB |
+| `macos-sequoia-vanilla` | `latest`, `15.2` | macOS Sequoia 15.2 image | 40GB |
+| `macos-sequoia-xcode` | `latest`, `15.2` | macOS Sequoia 15.2 image with Xcode command line tools | 50GB |
+| `macos-sequoia-cua` | `latest`, `15.3` | macOS Sequoia 15.3 image compatible with the Computer interface | 80GB |
 | `ubuntu-noble-vanilla` | `latest`, `24.04.1` | [Ubuntu Server for ARM 24.04.1 LTS](https://ubuntu.com/download/server/arm) with Ubuntu Desktop | 20GB |
 
 For additional disk space, resize the VM disk after pulling the image using the `lume set <name> --disk-size <size>` command.
@@ -151,25 +152,3 @@ lume is open-sourced under the MIT License - see the [LICENSE](LICENSE) file for
 ## Trademarks
 
 Apple, macOS, and Apple Silicon are trademarks of Apple Inc. Ubuntu and Canonical are registered trademarks of Canonical Ltd. This project is not affiliated with, endorsed by, or sponsored by Apple Inc. or Canonical Ltd.
-
-## Stargazers over time
-
-[![Stargazers over time](https://starchart.cc/trycua/lume.svg?variant=adaptive)](https://starchart.cc/trycua/lume)
-
-## Contributors
-
-<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
-<!-- prettier-ignore-start -->
-<!-- markdownlint-disable -->
-<table>
-  <tbody>
-    <tr>
-      <td align="center" valign="top" width="14.28%"><a href="https://github.com/f-trycua"><img src="https://avatars.githubusercontent.com/u/195596869?v=4?s=100" width="100px;" alt="f-trycua"/><br /><sub><b>f-trycua</b></sub></a><br /><a href="#code-f-trycua" title="Code">💻</a></td>
-    </tr>
-  </tbody>
-</table>
-
-<!-- markdownlint-restore -->
-<!-- prettier-ignore-end -->
-
-<!-- ALL-CONTRIBUTORS-LIST:END -->
