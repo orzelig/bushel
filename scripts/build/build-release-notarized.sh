@@ -44,6 +44,9 @@ for var in "${required_vars[@]}"; do
   fi
 done
 
+# Get VERSION from environment or use default
+VERSION=${VERSION:-"0.1.0"}
+
 # Move to the project root directory
 pushd ../../ > /dev/null
 
@@ -138,19 +141,35 @@ if [ "$LOG_LEVEL" != "minimal" ] && [ "$LOG_LEVEL" != "none" ]; then
   sudo ln -sf "$(pwd)/lume" /usr/local/bin/lume
 fi
 
-# Create archives of the package
-log "essential" "Creating archives..."
+# Get architecture and create OS identifier
+ARCH=$(uname -m)
+OS_IDENTIFIER="darwin-${ARCH}"
+
+# Create archives of the package with OS identifier in the name
+log "essential" "Creating archives with OS identifier..."
 cd "$(dirname "$PKG_PATH")"
-tar -czf lume.tar.gz lume > /dev/null 2>&1
-tar -czf lume.pkg.tar.gz lume.pkg > /dev/null 2>&1
+
+# Create both original and OS-specific archives (for backward compatibility)
+tar -czf "lume-${OS_IDENTIFIER}.tar.gz" lume > /dev/null 2>&1
+tar -czf "lume-${OS_IDENTIFIER}.pkg.tar.gz" lume.pkg > /dev/null 2>&1
+
+# Also create the original names for backward compatibility
+cp "lume-${OS_IDENTIFIER}.tar.gz" lume.tar.gz
+cp "lume-${OS_IDENTIFIER}.pkg.tar.gz" lume.pkg.tar.gz
+
+# Create version-specific archives if VERSION is provided
+if [ -n "$VERSION" ]; then
+  cp "lume-${OS_IDENTIFIER}.tar.gz" "lume-${VERSION}-${OS_IDENTIFIER}.tar.gz"
+  cp "lume-${OS_IDENTIFIER}.pkg.tar.gz" "lume-${VERSION}-${OS_IDENTIFIER}.pkg.tar.gz"
+fi
 
 # Create sha256 checksum for the lume tarball but don't display details in logs
 if [ "$LOG_LEVEL" = "minimal" ] || [ "$LOG_LEVEL" = "none" ]; then
-  shasum -a 256 lume.tar.gz > /dev/null
-  log "essential" "Package created successfully with checksum generated."
+  shasum -a 256 lume*.tar.gz > checksums.txt
+  log "essential" "Package created successfully with checksums generated."
 else
-  log "normal" "Creating checksum..."
-  shasum -a 256 lume.tar.gz
+  log "normal" "Creating checksums..."
+  shasum -a 256 lume*.tar.gz | tee checksums.txt
 fi
 
 popd > /dev/null
