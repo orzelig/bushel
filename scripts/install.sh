@@ -62,26 +62,10 @@ create_temp_dir() {
 
 # Download the latest release
 download_release() {
-  echo "Fetching latest release information..."
+  echo "Downloading latest Lume release..."
   
-  # Try to get the latest version from GitHub API
-  if command -v curl &> /dev/null; then
-    RELEASE_INFO=$(curl -s "$LATEST_RELEASE_URL")
-    VERSION=$(echo "$RELEASE_INFO" | grep -o '"tag_name": "v[^"]*"' | cut -d'"' -f4 | sed 's/^v//')
-    
-    if [ -z "$VERSION" ]; then
-      echo "${RED}Failed to get latest version.${NORMAL} Using direct download link."
-      # Try simpler URL with the non-versioned symlink
-      DOWNLOAD_URL="https://github.com/$GITHUB_REPO/releases/latest/download/lume.tar.gz"
-    else
-      echo "Latest version: ${BOLD}$VERSION${NORMAL}"
-      DOWNLOAD_URL="https://github.com/$GITHUB_REPO/releases/download/v$VERSION/lume.tar.gz"
-    fi
-  else
-    echo "${RED}curl not found.${NORMAL} Using direct download link."
-    DOWNLOAD_URL="https://github.com/$GITHUB_REPO/releases/latest/download/lume.tar.gz"
-  fi
-  
+  # Use the direct download link with the non-versioned symlink
+  DOWNLOAD_URL="https://github.com/$GITHUB_REPO/releases/latest/download/lume.tar.gz"
   echo "Downloading from: $DOWNLOAD_URL"
   
   # Download the tarball
