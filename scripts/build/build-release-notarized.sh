@@ -50,6 +50,10 @@ VERSION=${VERSION:-"0.1.0"}
 # Move to the project root directory
 pushd ../../ > /dev/null
 
+# Ensure .release directory exists and is clean
+mkdir -p .release
+log "normal" "Ensuring .release directory exists and is accessible"
+
 # Build the release version
 log "essential" "Building release version..."
 swift build -c release --product lume > /dev/null
@@ -131,14 +135,17 @@ if [ ! -f "usr/local/bin/lume" ]; then
     exit 1
 fi
 
-# Copy extracted lume to ./.release/lume
-cp -f usr/local/bin/lume "$(dirname "$PKG_PATH")/lume"
+# Get the release directory absolute path
+RELEASE_DIR="$(realpath "$(dirname "$PKG_PATH")")"
+log "normal" "Using release directory: $RELEASE_DIR"
+
+# Copy extracted lume to the release directory
+cp -f usr/local/bin/lume "$RELEASE_DIR/lume"
 
 # Create symbolic link in /usr/local/bin if not in minimal mode
 if [ "$LOG_LEVEL" != "minimal" ] && [ "$LOG_LEVEL" != "none" ]; then
   log "normal" "Creating symbolic link..."
-  cd "$(dirname "$PKG_PATH")"
-  sudo ln -sf "$(pwd)/lume" /usr/local/bin/lume
+  sudo ln -sf "$RELEASE_DIR/lume" /usr/local/bin/lume
 fi
 
 # Get architecture and create OS identifier
@@ -146,29 +153,35 @@ ARCH=$(uname -m)
 OS_IDENTIFIER="darwin-${ARCH}"
 
 # Create versioned archives of the package with OS identifier in the name
-log "essential" "Creating archives with OS identifier..."
-cd "$(dirname "$PKG_PATH")"
+log "essential" "Creating archives in $RELEASE_DIR..."
+cd "$RELEASE_DIR"
+
+# Clean up any existing artifacts first to avoid conflicts
+rm -f lume-*.tar.gz lume-*.pkg.tar.gz
 
 # Create version-specific archives
 log "essential" "Creating version-specific archives (${VERSION})..."
+# Package the binary
 tar -czf "lume-${VERSION}-${OS_IDENTIFIER}.tar.gz" lume > /dev/null 2>&1
+# Package the installer
 tar -czf "lume-${VERSION}-${OS_IDENTIFIER}.pkg.tar.gz" lume.pkg > /dev/null 2>&1
-
-# Delete temporary package files that we don't need to upload
-log "normal" "Cleaning up temporary files..."
-rm -f lume.pkg
-rm -f lume
 
 # Create sha256 checksum file
 log "essential" "Generating checksums..."
 shasum -a 256 lume-*.tar.gz > checksums.txt
 log "essential" "Package created successfully with checksums generated."
 
-# Show what we're publishing
-ls -la *.tar.gz *.pkg.tar.gz
+# Show what's in the release directory
+log "essential" "Files in release directory:"
+ls -la "$RELEASE_DIR"
+
+# Ensure correct permissions
+chmod 644 "$RELEASE_DIR"/*.tar.gz "$RELEASE_DIR"/*.pkg.tar.gz "$RELEASE_DIR"/checksums.txt
 
 popd > /dev/null
 
 # Clean up
 rm -rf "$TEMP_ROOT"
 rm -rf "$EXTRACT_ROOT"
+
+log "essential" "Build and packaging completed successfully."
