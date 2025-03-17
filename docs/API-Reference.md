@@ -181,7 +181,7 @@ curl --connect-timeout 6000 \
     "name": "source-vm",
     "newName": "cloned-vm"
   }' \
-  http://localhost:3000/lume/vms/source-vm/clone
+  http://localhost:3000/lume/vms/clone
 ```
 </details>
 
