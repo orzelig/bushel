@@ -145,32 +145,27 @@ fi
 ARCH=$(uname -m)
 OS_IDENTIFIER="darwin-${ARCH}"
 
-# Create archives of the package with OS identifier in the name
+# Create versioned archives of the package with OS identifier in the name
 log "essential" "Creating archives with OS identifier..."
 cd "$(dirname "$PKG_PATH")"
 
-# Create both original and OS-specific archives (for backward compatibility)
-tar -czf "lume-${OS_IDENTIFIER}.tar.gz" lume > /dev/null 2>&1
-tar -czf "lume-${OS_IDENTIFIER}.pkg.tar.gz" lume.pkg > /dev/null 2>&1
+# Create version-specific archives
+log "essential" "Creating version-specific archives (${VERSION})..."
+tar -czf "lume-${VERSION}-${OS_IDENTIFIER}.tar.gz" lume > /dev/null 2>&1
+tar -czf "lume-${VERSION}-${OS_IDENTIFIER}.pkg.tar.gz" lume.pkg > /dev/null 2>&1
 
-# Also create the original names for backward compatibility
-cp "lume-${OS_IDENTIFIER}.tar.gz" lume.tar.gz
-cp "lume-${OS_IDENTIFIER}.pkg.tar.gz" lume.pkg.tar.gz
+# Delete temporary package files that we don't need to upload
+log "normal" "Cleaning up temporary files..."
+rm -f lume.pkg
+rm -f lume
 
-# Create version-specific archives if VERSION is provided
-if [ -n "$VERSION" ]; then
-  cp "lume-${OS_IDENTIFIER}.tar.gz" "lume-${VERSION}-${OS_IDENTIFIER}.tar.gz"
-  cp "lume-${OS_IDENTIFIER}.pkg.tar.gz" "lume-${VERSION}-${OS_IDENTIFIER}.pkg.tar.gz"
-fi
+# Create sha256 checksum file
+log "essential" "Generating checksums..."
+shasum -a 256 lume-*.tar.gz > checksums.txt
+log "essential" "Package created successfully with checksums generated."
 
-# Create sha256 checksum for the lume tarball but don't display details in logs
-if [ "$LOG_LEVEL" = "minimal" ] || [ "$LOG_LEVEL" = "none" ]; then
-  shasum -a 256 lume*.tar.gz > checksums.txt
-  log "essential" "Package created successfully with checksums generated."
-else
-  log "normal" "Creating checksums..."
-  shasum -a 256 lume*.tar.gz | tee checksums.txt
-fi
+# Show what we're publishing
+ls -la *.tar.gz *.pkg.tar.gz
 
 popd > /dev/null
 
