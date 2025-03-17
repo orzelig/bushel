@@ -100,9 +100,10 @@ Command Options:
 
 ## Install
 
+Install with a single command:
+
 ```bash
-brew tap trycua/lume
-brew install lume
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/lume/scripts/install.sh)"
 ```
 
 You can also download the `lume.pkg.tar.gz` archive from the [latest release](https://github.com/trycua/lume/releases), extract it, and install the package manually.
