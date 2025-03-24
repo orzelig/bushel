@@ -37,9 +37,10 @@ struct PullRequest: Codable {
     let name: String?
     var registry: String
     var organization: String
+    var noCache: Bool
     
     enum CodingKeys: String, CodingKey {
-        case image, name, registry, organization
+        case image, name, registry, organization, noCache
     }
     
     init(from decoder: Decoder) throws {
@@ -48,6 +49,7 @@ struct PullRequest: Codable {
         name = try container.decodeIfPresent(String.self, forKey: .name)
         registry = try container.decodeIfPresent(String.self, forKey: .registry) ?? "ghcr.io"
         organization = try container.decodeIfPresent(String.self, forKey: .organization) ?? "trycua"
+        noCache = try container.decodeIfPresent(Bool.self, forKey: .noCache) ?? false
     }
 }
 

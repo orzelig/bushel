@@ -151,7 +151,8 @@ curl --connect-timeout 6000 \
     "image": "macos-sequoia-vanilla:latest",
     "name": "my-vm-name",
     "registry": "ghcr.io",
-    "organization": "trycua"
+    "organization": "trycua",
+    "noCache": false
   }' \
   http://localhost:3000/lume/pull
 ```

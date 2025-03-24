@@ -225,7 +225,7 @@ extension Server {
 
         do {
             let vmController = LumeController()
-            try await vmController.pullImage(image: request.image, name: request.name, registry: request.registry, organization: request.organization)
+            try await vmController.pullImage(image: request.image, name: request.name, registry: request.registry, organization: request.organization, noCache: request.noCache)
             return HTTPResponse(
                 statusCode: .ok,
                 headers: ["Content-Type": "application/json"],
