@@ -240,7 +240,7 @@ class ImageContainerRegistry: @unchecked Sendable {
         }
     }
 
-    func pull(image: String, name: String?) async throws {
+    func pull(image: String, name: String?, noCache: Bool = false) async throws {
         // Validate home directory
         let home = Home()
         try home.validateHomeDirectory()
@@ -287,27 +287,32 @@ class ImageContainerRegistry: @unchecked Sendable {
             try? FileManager.default.removeItem(at: tempVMDir)
         }
 
-        // Check if we have a valid cached version
+        // Check if we have a valid cached version and noCache is false
         Logger.info("Checking cache for manifest ID: \(manifestId)")
-        if validateCache(manifest: manifest, manifestId: manifestId) {
+        if !noCache && validateCache(manifest: manifest, manifestId: manifestId) {
             Logger.info("Using cached version of image")
             try await copyFromCache(manifest: manifest, manifestId: manifestId, to: tempVMDir)
         } else {
             // Clean up old versions of this repository before setting up new cache
-            try cleanupOldVersions(currentManifestId: manifestId, image: imageName)
+            if !noCache {
+                try cleanupOldVersions(currentManifestId: manifestId, image: imageName)
+            }
 
-            Logger.info("Cache miss or invalid cache, setting up new cache")
-            // Setup new cache directory
-            try setupImageCache(manifestId: manifestId)
+            if noCache {
+                Logger.info("Skipping cache setup due to noCache option")
+            } else {
+                Logger.info("Cache miss or invalid cache, setting up new cache")
+                // Setup new cache directory
+                try setupImageCache(manifestId: manifestId)
+                // Save new manifest
+                try saveManifest(manifest, manifestId: manifestId)
 
-            // Save new manifest
-            try saveManifest(manifest, manifestId: manifestId)
-
-            // Save image metadata
-            try saveImageMetadata(
-                image: imageName,
-                manifestId: manifestId
-            )
+                // Save image metadata
+                try saveImageMetadata(
+                    image: imageName,
+                    manifestId: manifestId
+                )
+            }
 
             // Create temporary directory for new downloads
             let tempDownloadDir = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -375,12 +380,12 @@ class ImageContainerRegistry: @unchecked Sendable {
                         let cachedLayer = getCachedLayerPath(
                             manifestId: manifestId, digest: layer.digest)
 
-                        if FileManager.default.fileExists(atPath: cachedLayer.path) {
+                        if !noCache && FileManager.default.fileExists(atPath: cachedLayer.path) {
                             try FileManager.default.copyItem(at: cachedLayer, to: outputURL)
                             await progress.addProgress(Int64(layer.size))
                         } else {
-                            // Check if this layer is already being downloaded
-                            if isDownloading(layer.digest) {
+                            // Check if this layer is already being downloaded and we're not skipping cache
+                            if !noCache && isDownloading(layer.digest) {
                                 try await waitForExistingDownload(
                                     layer.digest, cachedLayer: cachedLayer)
                                 if FileManager.default.fileExists(atPath: cachedLayer.path) {
@@ -391,8 +396,9 @@ class ImageContainerRegistry: @unchecked Sendable {
                             }
 
                             // Start new download
-                            markDownloadStarted(layer.digest)
-                            defer { markDownloadComplete(layer.digest) }
+                            if !noCache {
+                                markDownloadStarted(layer.digest)
+                            }
 
                             try await self.downloadLayer(
                                 repository: "\(self.organization)/\(imageName)",
@@ -404,11 +410,14 @@ class ImageContainerRegistry: @unchecked Sendable {
                                 progress: progress
                             )
 
-                            // Cache the downloaded layer
-                            if FileManager.default.fileExists(atPath: cachedLayer.path) {
-                                try FileManager.default.removeItem(at: cachedLayer)
+                            // Cache the downloaded layer if not in noCache mode
+                            if !noCache {
+                                if FileManager.default.fileExists(atPath: cachedLayer.path) {
+                                    try FileManager.default.removeItem(at: cachedLayer)
+                                }
+                                try FileManager.default.copyItem(at: outputURL, to: cachedLayer)
+                                markDownloadComplete(layer.digest)
                             }
-                            try FileManager.default.copyItem(at: outputURL, to: cachedLayer)
                         }
 
                         return Int64(layer.size)
