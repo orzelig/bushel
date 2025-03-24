@@ -316,7 +316,7 @@ final class LumeController {
     }
 
     @MainActor
-    public func pullImage(image: String, name: String?, registry: String, organization: String)
+    public func pullImage(image: String, name: String?, registry: String, organization: String, noCache: Bool = false)
         async throws
     {
         do {
@@ -336,7 +336,7 @@ final class LumeController {
 
             let imageContainerRegistry = ImageContainerRegistry(
                 registry: registry, organization: organization)
-            try await imageContainerRegistry.pull(image: image, name: vmName)
+            try await imageContainerRegistry.pull(image: image, name: vmName, noCache: noCache)
 
             Logger.info("Setting new VM mac address")
 

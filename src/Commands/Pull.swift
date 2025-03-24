@@ -17,12 +17,15 @@ struct Pull: AsyncParsableCommand {
 
     @Option(help: "Organization to pull from. Defaults to trycua")
     var organization: String = "trycua"
-    
+
+    @Flag(help: "Pull image without creating .cache. Defaults to false")
+    var noCache: Bool = false
+
     init() {}
     
     @MainActor
     func run() async throws {
         let vmController = LumeController()
-        try await vmController.pullImage(image: image, name: name, registry: registry, organization: organization)
+        try await vmController.pullImage(image: image, name: name, registry: registry, organization: organization, noCache: noCache)
     }
 }
