@@ -638,6 +638,9 @@ class ImageContainerRegistry: @unchecked Sendable {
         try FileManager.default.moveItem(at: tempVMDir, to: URL(fileURLWithPath: vmDir.dir.path))
 
         Logger.info("Download complete: Files extracted to \(vmDir.dir.path)")
+        Logger.info(
+            "Run 'lume run \(vmName)' to reduce the disk image file size by using macOS sparse file system"
+        )
     }
 
     private func copyFromCache(manifest: Manifest, manifestId: String, to destination: URL)
