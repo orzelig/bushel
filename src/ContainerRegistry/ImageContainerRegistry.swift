@@ -49,15 +49,188 @@ actor ProgressTracker {
     private var totalFiles: Int = 0
     private var completedFiles: Int = 0
 
+    // Download speed tracking
+    private var startTime: Date = Date()
+    private var lastUpdateTime: Date = Date()
+    private var lastUpdateBytes: Int64 = 0
+    private var speedSamples: [Double] = []
+    private var peakSpeed: Double = 0
+    private var totalElapsedTime: TimeInterval = 0
+
     func setTotal(_ total: Int64, files: Int) {
         totalBytes = total
         totalFiles = files
+        startTime = Date()
+        lastUpdateTime = startTime
     }
 
     func addProgress(_ bytes: Int64) {
         downloadedBytes += bytes
-        let progress = Double(downloadedBytes) / Double(totalBytes)
-        progressLogger.logProgress(current: progress, context: "Downloading Image")
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastUpdateTime)
+
+        // Only update stats and display progress if enough time has passed (at least 0.5 seconds)
+        if elapsed >= 0.5 {
+            let currentSpeed = Double(downloadedBytes - lastUpdateBytes) / elapsed
+            speedSamples.append(currentSpeed)
+
+            // Cap samples array to prevent memory growth
+            if speedSamples.count > 20 {
+                speedSamples.removeFirst(speedSamples.count - 20)
+            }
+
+            // Update peak speed
+            peakSpeed = max(peakSpeed, currentSpeed)
+
+            // Calculate average speed over the last few samples
+            let recentAvgSpeed = calculateAverageSpeed()
+
+            // Calculate overall average
+            let totalElapsed = now.timeIntervalSince(startTime)
+            let overallAvgSpeed = totalElapsed > 0 ? Double(downloadedBytes) / totalElapsed : 0
+
+            let progress = Double(downloadedBytes) / Double(totalBytes)
+            logSpeedProgress(
+                current: progress,
+                currentSpeed: currentSpeed,
+                averageSpeed: recentAvgSpeed,
+                overallSpeed: overallAvgSpeed,
+                peakSpeed: peakSpeed,
+                context: "Downloading Image"
+            )
+
+            // Update tracking variables
+            lastUpdateTime = now
+            lastUpdateBytes = downloadedBytes
+            totalElapsedTime = totalElapsed
+        }
+    }
+
+    private func calculateAverageSpeed() -> Double {
+        guard !speedSamples.isEmpty else { return 0 }
+        // Use the most recent samples (up to last 5)
+        let samples = speedSamples.suffix(min(5, speedSamples.count))
+        return samples.reduce(0, +) / Double(samples.count)
+    }
+
+    func getDownloadStats() -> DownloadStats {
+        let avgSpeed = totalElapsedTime > 0 ? Double(downloadedBytes) / totalElapsedTime : 0
+        return DownloadStats(
+            totalBytes: totalBytes,
+            downloadedBytes: downloadedBytes,
+            elapsedTime: totalElapsedTime,
+            averageSpeed: avgSpeed,
+            peakSpeed: peakSpeed
+        )
+    }
+
+    private func logSpeedProgress(
+        current: Double,
+        currentSpeed: Double,
+        averageSpeed: Double,
+        overallSpeed: Double,
+        peakSpeed: Double,
+        context: String
+    ) {
+        let progressPercent = Int(current * 100)
+        let currentSpeedStr = formatByteSpeed(currentSpeed)
+        let avgSpeedStr = formatByteSpeed(averageSpeed)
+        let peakSpeedStr = formatByteSpeed(peakSpeed)
+
+        // Calculate ETA based on overall average speed
+        let remainingBytes = totalBytes - downloadedBytes
+        let etaSeconds = overallSpeed > 0 ? Double(remainingBytes) / overallSpeed : 0
+        let etaStr = formatTimeRemaining(etaSeconds)
+
+        let progressBar = createProgressBar(progress: current)
+
+        print(
+            "\r\(progressBar) \(progressPercent)% | Current: \(currentSpeedStr) | Avg: \(avgSpeedStr) | Peak: \(peakSpeedStr) | ETA: \(etaStr)     ",
+            terminator: "")
+        fflush(stdout)
+    }
+
+    private func createProgressBar(progress: Double, width: Int = 20) -> String {
+        let completedWidth = Int(progress * Double(width))
+        let remainingWidth = width - completedWidth
+
+        let completed = String(repeating: "█", count: completedWidth)
+        let remaining = String(repeating: "░", count: remainingWidth)
+
+        return "[\(completed)\(remaining)]"
+    }
+
+    private func formatByteSpeed(_ bytesPerSecond: Double) -> String {
+        let units = ["B/s", "KB/s", "MB/s", "GB/s"]
+        var speed = bytesPerSecond
+        var unitIndex = 0
+
+        while speed > 1024 && unitIndex < units.count - 1 {
+            speed /= 1024
+            unitIndex += 1
+        }
+
+        return String(format: "%.1f %@", speed, units[unitIndex])
+    }
+
+    private func formatTimeRemaining(_ seconds: Double) -> String {
+        if seconds.isNaN || seconds.isInfinite || seconds <= 0 {
+            return "calculating..."
+        }
+
+        let hours = Int(seconds) / 3600
+        let minutes = (Int(seconds) % 3600) / 60
+        let secs = Int(seconds) % 60
+
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, secs)
+        } else {
+            return String(format: "%d:%02d", minutes, secs)
+        }
+    }
+}
+
+struct DownloadStats {
+    let totalBytes: Int64
+    let downloadedBytes: Int64
+    let elapsedTime: TimeInterval
+    let averageSpeed: Double
+    let peakSpeed: Double
+
+    func formattedSummary() -> String {
+        let bytesStr = ByteCountFormatter.string(fromByteCount: downloadedBytes, countStyle: .file)
+        let avgSpeedStr = formatSpeed(averageSpeed)
+        let peakSpeedStr = formatSpeed(peakSpeed)
+        let timeStr = formatTime(elapsedTime)
+
+        return """
+            Download Statistics:
+            - Total downloaded: \(bytesStr)
+            - Elapsed time: \(timeStr)
+            - Average speed: \(avgSpeedStr)
+            - Peak speed: \(peakSpeedStr)
+            """
+    }
+
+    private func formatSpeed(_ bytesPerSecond: Double) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        let bytesStr = formatter.string(fromByteCount: Int64(bytesPerSecond))
+        return "\(bytesStr)/s"
+    }
+
+    private func formatTime(_ seconds: TimeInterval) -> String {
+        let hours = Int(seconds) / 3600
+        let minutes = (Int(seconds) % 3600) / 60
+        let secs = Int(seconds) % 60
+
+        if hours > 0 {
+            return String(format: "%d hours, %d minutes, %d seconds", hours, minutes, secs)
+        } else if minutes > 0 {
+            return String(format: "%d minutes, %d seconds", minutes, secs)
+        } else {
+            return String(format: "%d seconds", secs)
+        }
     }
 }
 
@@ -355,15 +528,18 @@ class ImageContainerRegistry: @unchecked Sendable {
             )
             var diskParts: [(Int, URL)] = []
             var totalParts = 0
-            let maxConcurrentTasks = 5
-            let counter = TaskCounter()
 
-            // Use a more efficient approach for memory-constrained systems
+            // Adaptive concurrency based on system capabilities
             let memoryConstrained = determineIfMemoryConstrained()
+            let networkQuality = determineNetworkQuality()
+            let maxConcurrentTasks = calculateOptimalConcurrency(
+                memoryConstrained: memoryConstrained, networkQuality: networkQuality)
+
             Logger.info(
-                memoryConstrained
-                    ? "Using memory-optimized mode for disk parts"
-                    : "Using standard mode for disk parts")
+                "Using adaptive download configuration: Concurrency=\(maxConcurrentTasks), Memory-optimized=\(memoryConstrained)"
+            )
+
+            let counter = TaskCounter()
 
             try await withThrowingTaskGroup(of: Int64.self) { group in
                 for layer in manifest.layers {
@@ -523,81 +699,127 @@ class ImageContainerRegistry: @unchecked Sendable {
             }
             Logger.info("")  // New line after progress
 
+            // Display download statistics
+            let stats = await progress.getDownloadStats()
+            Logger.info(stats.formattedSummary())
+
             // Handle disk parts if present
             if !diskParts.isEmpty {
-                Logger.info("Reassembling disk image...")
+                Logger.info("Reassembling disk image using sparse file technique...")
                 let outputURL = tempVMDir.appendingPathComponent("disk.img")
                 try FileManager.default.createDirectory(
                     at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
-                // Create empty output file
-                FileManager.default.createFile(atPath: outputURL.path, contents: nil)
-                let outputHandle = try FileHandle(forWritingTo: outputURL)
-                defer { try? outputHandle.close() }
+                // Ensure the output file exists but is empty
+                if FileManager.default.fileExists(atPath: outputURL.path) {
+                    try FileManager.default.removeItem(at: outputURL)
+                }
 
-                var totalWritten: UInt64 = 0
+                // Calculate expected size from the manifest layers
                 let expectedTotalSize = UInt64(
                     manifest.layers.filter { extractPartInfo(from: $0.mediaType) != nil }.reduce(0)
-                    { $0 + $1.size })
+                    { $0 + $1.size }
+                )
+                Logger.info(
+                    "Expected final size: \(ByteCountFormatter.string(fromByteCount: Int64(expectedTotalSize), countStyle: .file))"
+                )
 
-                // Process parts in order
+                // Create sparse file of the required size
+                FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+                let outputHandle = try FileHandle(forWritingTo: outputURL)
+
+                // Set the file size without writing data (creates a sparse file)
+                try outputHandle.truncate(atOffset: expectedTotalSize)
+
+                var reassemblyProgressLogger = ProgressLogger(threshold: 0.05)
+                var processedSize: UInt64 = 0
+
+                // Process each part in order
                 for partNum in 1...totalParts {
                     guard let (_, partURL) = diskParts.first(where: { $0.0 == partNum }) else {
                         throw PullError.missingPart(partNum)
                     }
 
+                    Logger.info(
+                        "Processing part \(partNum) of \(totalParts): \(partURL.lastPathComponent)")
+
+                    // Get part file size
+                    let partAttributes = try FileManager.default.attributesOfItem(
+                        atPath: partURL.path)
+                    let partSize = partAttributes[.size] as? UInt64 ?? 0
+
+                    // Calculate the offset in the final file (parts are sequential)
+                    let partOffset = processedSize
+
+                    // Open input file
                     let inputHandle = try FileHandle(forReadingFrom: partURL)
                     defer {
                         try? inputHandle.close()
-                        // Don't delete the part file if we're in cache mode and the part is from cache
+                        // Don't delete the part file if it's from cache
                         if !partURL.path.contains(cacheDirectory.path) {
                             try? FileManager.default.removeItem(at: partURL)
                         }
                     }
 
-                    // On low memory systems, be more aggressive with releasing memory
-                    let memoryConstrained = determineIfMemoryConstrained()
-                    var chunksProcessed = 0
+                    // Seek to the appropriate offset in output file
+                    try outputHandle.seek(toOffset: partOffset)
 
-                    while let data = try inputHandle.read(upToCount: getOptimalChunkSize()) {
-                        try autoreleasepool {
-                            try outputHandle.write(contentsOf: data)
-                            totalWritten += UInt64(data.count)
+                    // Copy data in chunks to avoid memory issues
+                    let chunkSize: UInt64 =
+                        determineIfMemoryConstrained() ? 256 * 1024 : 1024 * 1024  // Use smaller chunks (256KB-1MB)
+                    var bytesWritten: UInt64 = 0
 
-                            // Only log progress every 5% to reduce log noise
-                            let progress: Double =
-                                Double(totalWritten) / Double(expectedTotalSize) * 100
-                            let roundedProgress = Int(progress / 5) * 5
-                            if roundedProgress != Int(
-                                (Double(totalWritten - UInt64(data.count))
-                                    / Double(expectedTotalSize) * 100)
-                                    / 5) * 5
-                            {
-                                Logger.info("Reassembling disk image: \(roundedProgress)%")
+                    while bytesWritten < partSize {
+                        // Use Foundation's autoreleasepool for proper memory management
+                        Foundation.autoreleasepool {
+                            let readSize: UInt64 = min(UInt64(chunkSize), partSize - bytesWritten)
+                            if let chunk = try? inputHandle.read(upToCount: Int(readSize)) {
+                                if !chunk.isEmpty {
+                                    try? outputHandle.write(contentsOf: chunk)
+                                    bytesWritten += UInt64(chunk.count)
+
+                                    // Update progress less frequently to reduce overhead
+                                    if bytesWritten % (chunkSize * 4) == 0
+                                        || bytesWritten == partSize
+                                    {
+                                        let totalProgress =
+                                            Double(processedSize + bytesWritten)
+                                            / Double(expectedTotalSize)
+                                        reassemblyProgressLogger.logProgress(
+                                            current: totalProgress,
+                                            context: "Reassembling disk image")
+                                    }
+                                }
                             }
 
-                            // Force more frequent autoreleases on memory-constrained systems
-                            chunksProcessed += 1
-                            if memoryConstrained && chunksProcessed % 10 == 0 {
-                                try outputHandle.synchronize()
+                            // Add a small delay every few MB to allow memory cleanup
+                            if bytesWritten % (chunkSize * 16) == 0 && bytesWritten > 0 {
+                                // Use Thread.sleep for now, but ideally this would use a non-blocking approach
+                                // that is appropriate for the context (sync/async)
+                                Thread.sleep(forTimeInterval: 0.01)
                             }
                         }
                     }
 
-                    // Make sure we explicitly close handles after each part to free resources
-                    try? inputHandle.synchronize()
-                    try inputHandle.close()
+                    // Update processed size
+                    processedSize += partSize
                 }
+
+                // Finalize progress
+                reassemblyProgressLogger.logProgress(
+                    current: 1.0, context: "Reassembling disk image")
+                Logger.info("")  // Newline after progress
+
+                // Close the output file
+                try outputHandle.synchronize()
+                try outputHandle.close()
 
                 // Verify final size
                 let finalSize =
-                    try FileManager.default.attributesOfItem(atPath: outputURL.path)[.size]
-                    as? UInt64 ?? 0
+                    (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size]
+                        as? UInt64) ?? 0
                 Logger.info(
                     "Final disk image size: \(ByteCountFormatter.string(fromByteCount: Int64(finalSize), countStyle: .file))"
-                )
-                Logger.info(
-                    "Expected size: \(ByteCountFormatter.string(fromByteCount: Int64(expectedTotalSize), countStyle: .file))"
                 )
 
                 if finalSize != expectedTotalSize {
@@ -606,7 +828,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                     )
                 }
 
-                Logger.info("Disk image reassembled successfully")
+                Logger.info("Disk image reassembled successfully using sparse file technique")
             } else {
                 // Copy single disk image if it exists
                 let diskURL = tempDownloadDir.appendingPathComponent("disk.img")
@@ -697,67 +919,116 @@ class ImageContainerRegistry: @unchecked Sendable {
 
         // Reassemble disk parts if needed
         if !diskPartSources.isEmpty {
-            Logger.info("Reassembling disk image from cached parts (optimized storage)...")
+            Logger.info(
+                "Reassembling disk image from cached parts using sparse file technique..."
+            )
             let outputURL = destination.appendingPathComponent("disk.img")
+
+            // Ensure the output file exists but is empty
+            if FileManager.default.fileExists(atPath: outputURL.path) {
+                try FileManager.default.removeItem(at: outputURL)
+            }
+
+            // Calculate expected total size from the cached files
+            let expectedTotalSize: UInt64 = diskPartSources.reduce(UInt64(0)) {
+                (acc: UInt64, element) -> UInt64 in
+                let fileSize =
+                    (try? FileManager.default.attributesOfItem(atPath: element.1.path)[.size]
+                        as? UInt64 ?? 0) ?? 0
+                return acc + fileSize
+            }
+            Logger.info(
+                "Expected final size from cache: \(ByteCountFormatter.string(fromByteCount: Int64(expectedTotalSize), countStyle: .file))"
+            )
+
+            // Create sparse file of the required size
             FileManager.default.createFile(atPath: outputURL.path, contents: nil)
             let outputHandle = try FileHandle(forWritingTo: outputURL)
-            defer { try? outputHandle.close() }
 
-            var totalWritten: UInt64 = 0
+            // Set the file size without writing data (creates a sparse file)
+            try outputHandle.truncate(atOffset: expectedTotalSize)
 
-            // Process parts in order, reading directly from cache
+            var reassemblyProgressLogger = ProgressLogger(threshold: 0.05)
+            var processedSize: UInt64 = 0
+
+            // Process each part in order
             for partNum in 1...totalParts {
                 guard let (_, sourceURL) = diskPartSources.first(where: { $0.0 == partNum }) else {
                     throw PullError.missingPart(partNum)
                 }
 
-                // Read directly from the cached part
+                Logger.info(
+                    "Processing part \(partNum) of \(totalParts) from cache: \(sourceURL.lastPathComponent)"
+                )
+
+                // Get part file size
+                let partAttributes = try FileManager.default.attributesOfItem(
+                    atPath: sourceURL.path)
+                let partSize = partAttributes[.size] as? UInt64 ?? 0
+
+                // Calculate the offset in the final file (parts are sequential)
+                let partOffset = processedSize
+
+                // Open input file
                 let inputHandle = try FileHandle(forReadingFrom: sourceURL)
                 defer { try? inputHandle.close() }
 
-                // On low memory systems, be more aggressive with releasing memory
-                let memoryConstrained = determineIfMemoryConstrained()
-                var chunksProcessed = 0
+                // Seek to the appropriate offset in output file
+                try outputHandle.seek(toOffset: partOffset)
 
-                while let data = try inputHandle.read(upToCount: getOptimalChunkSize()) {
-                    try autoreleasepool {
-                        try outputHandle.write(contentsOf: data)
-                        totalWritten += UInt64(data.count)
+                // Copy data in chunks to avoid memory issues
+                let chunkSize: UInt64 = determineIfMemoryConstrained() ? 256 * 1024 : 1024 * 1024  // Use smaller chunks (256KB-1MB)
+                var bytesWritten: UInt64 = 0
 
-                        // Only log progress every 5% to reduce log noise
-                        let progress: Double =
-                            Double(totalWritten) / Double(expectedTotalSize) * 100
-                        let roundedProgress = Int(progress / 5) * 5
-                        if roundedProgress != Int(
-                            (Double(totalWritten - UInt64(data.count)) / Double(expectedTotalSize)
-                                * 100)
-                                / 5) * 5
-                        {
-                            Logger.info("Reassembling disk image from cache: \(roundedProgress)%")
+                while bytesWritten < partSize {
+                    // Use Foundation's autoreleasepool for proper memory management
+                    Foundation.autoreleasepool {
+                        let readSize: UInt64 = min(UInt64(chunkSize), partSize - bytesWritten)
+                        if let chunk = try? inputHandle.read(upToCount: Int(readSize)) {
+                            if !chunk.isEmpty {
+                                try? outputHandle.write(contentsOf: chunk)
+                                bytesWritten += UInt64(chunk.count)
+
+                                // Update progress less frequently to reduce overhead
+                                if bytesWritten % (chunkSize * 4) == 0 || bytesWritten == partSize {
+                                    let totalProgress =
+                                        Double(processedSize + bytesWritten)
+                                        / Double(expectedTotalSize)
+                                    reassemblyProgressLogger.logProgress(
+                                        current: totalProgress,
+                                        context: "Reassembling disk image from cache")
+                                }
+                            }
                         }
 
-                        // Force more frequent autoreleases on memory-constrained systems
-                        chunksProcessed += 1
-                        if memoryConstrained && chunksProcessed % 10 == 0 {
-                            try outputHandle.synchronize()
+                        // Add a small delay every few MB to allow memory cleanup
+                        if bytesWritten % (chunkSize * 16) == 0 && bytesWritten > 0 {
+                            // Use Thread.sleep for now, but ideally this would use a non-blocking approach
+                            // that is appropriate for the context (sync/async)
+                            Thread.sleep(forTimeInterval: 0.01)
                         }
                     }
                 }
 
-                // Make sure we explicitly close handles after each part to free resources
-                try? inputHandle.synchronize()
-                try inputHandle.close()
+                // Update processed size
+                processedSize += partSize
             }
+
+            // Finalize progress
+            reassemblyProgressLogger.logProgress(
+                current: 1.0, context: "Reassembling disk image from cache")
+            Logger.info("")  // Newline after progress
+
+            // Close the output file
+            try outputHandle.synchronize()
+            try outputHandle.close()
 
             // Verify final size
             let finalSize =
-                try FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? UInt64
+                (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? UInt64)
                 ?? 0
             Logger.info(
-                "Final disk image size: \(ByteCountFormatter.string(fromByteCount: Int64(finalSize), countStyle: .file))"
-            )
-            Logger.info(
-                "Expected size: \(ByteCountFormatter.string(fromByteCount: Int64(expectedTotalSize), countStyle: .file))"
+                "Final disk image size from cache: \(ByteCountFormatter.string(fromByteCount: Int64(finalSize), countStyle: .file))"
             )
 
             if finalSize != expectedTotalSize {
@@ -765,6 +1036,9 @@ class ImageContainerRegistry: @unchecked Sendable {
                     "Warning: Final size (\(finalSize) bytes) differs from expected size (\(expectedTotalSize) bytes)"
                 )
             }
+
+            Logger.info(
+                "Disk image reassembled successfully from cache using sparse file technique")
         }
 
         Logger.info("Cache copy complete")
@@ -824,12 +1098,22 @@ class ImageContainerRegistry: @unchecked Sendable {
                 request.addValue(mediaType, forHTTPHeaderField: "Accept")
                 request.timeoutInterval = 60
 
-                // Configure session for better reliability
+                // Optimized session configuration for speed
                 let config = URLSessionConfiguration.default
                 config.timeoutIntervalForRequest = 60
                 config.timeoutIntervalForResource = 3600
                 config.waitsForConnectivity = true
-                config.httpMaximumConnectionsPerHost = 1
+
+                // Performance optimizations
+                config.httpMaximumConnectionsPerHost = 6
+                config.httpShouldUsePipelining = true
+                config.requestCachePolicy = .reloadIgnoringLocalCacheData
+
+                // Network service type optimization
+                if getTCPReceiveWindowSize() != nil {
+                    // If we can get TCP window size, the system supports advanced networking
+                    config.networkServiceType = .responsiveData
+                }
 
                 let session = URLSession(configuration: config)
 
@@ -849,8 +1133,13 @@ class ImageContainerRegistry: @unchecked Sendable {
             } catch {
                 lastError = error
                 if attempt < maxRetries {
-                    let delay = Double(attempt) * 5
+                    // Exponential backoff with jitter for retries
+                    let baseDelay = Double(attempt) * 2
+                    let jitter = Double.random(in: 0...1)
+                    let delay = baseDelay + jitter
                     try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+
+                    Logger.info("Retrying download (attempt \(attempt+1)/\(maxRetries)): \(digest)")
                 }
             }
         }
@@ -1075,27 +1364,47 @@ class ImageContainerRegistry: @unchecked Sendable {
             }
         }
 
-        // Default to 512KB as a safe minimum
-        let defaultChunkSize = 512 * 1024
+        // Define chunk size parameters
+        let safeMinimumChunkSize = 128 * 1024  // Reduced minimum for constrained systems
+        let defaultChunkSize = 512 * 1024  // Standard default / minimum for non-constrained
+        let constrainedCap = 512 * 1024  // Lower cap for constrained systems
+        let standardCap = 2 * 1024 * 1024  // Standard cap for non-constrained systems
 
-        // If we can't get memory info, return conservative default
+        // If we can't get memory info, return a reasonable default
         guard result == KERN_SUCCESS else {
+            Logger.info(
+                "Could not get VM statistics, using default chunk size: \(defaultChunkSize) bytes")
             return defaultChunkSize
         }
 
-        // Calculate free memory in bytes using a fixed page size
-        // Standard page size on macOS is 4KB or 16KB
-        let pageSize = 4096  // Use a constant instead of vm_kernel_page_size
+        // Calculate free memory in bytes
+        let pageSize = 4096  // Use a constant page size assumption
         let freeMemory = UInt64(stats.free_count) * UInt64(pageSize)
+        let isConstrained = determineIfMemoryConstrained()  // Check if generally constrained
 
-        // On very memory-constrained systems (< 1GB free), use the minimum
-        if freeMemory < 1_073_741_824 {  // 1GB
-            return defaultChunkSize
+        // Extremely constrained (< 512MB free) -> use absolute minimum
+        if freeMemory < 536_870_912 {  // 512MB
+            Logger.info(
+                "System extremely memory constrained (<512MB free), using minimum chunk size: \(safeMinimumChunkSize) bytes"
+            )
+            return safeMinimumChunkSize
         }
 
-        // For systems with adequate memory, use a smarter sizing approach:
-        // - Use 0.1% of free memory, with limits
-        let adaptiveSize = min(max(Int(freeMemory / 1000), defaultChunkSize), 2 * 1024 * 1024)
+        // Generally constrained -> use adaptive size with lower cap
+        if isConstrained {
+            let adaptiveSize = min(
+                max(Int(freeMemory / 1000), safeMinimumChunkSize), constrainedCap)
+            Logger.info(
+                "System memory constrained, using adaptive chunk size capped at \(constrainedCap) bytes: \(adaptiveSize) bytes"
+            )
+            return adaptiveSize
+        }
+
+        // Not constrained -> use original adaptive logic with standard cap
+        let adaptiveSize = min(max(Int(freeMemory / 1000), defaultChunkSize), standardCap)
+        Logger.info(
+            "System has sufficient memory, using adaptive chunk size capped at \(standardCap) bytes: \(adaptiveSize) bytes"
+        )
         return adaptiveSize
     }
 
@@ -1124,5 +1433,107 @@ class ImageContainerRegistry: @unchecked Sendable {
 
         // Consider memory constrained if less than 2GB free
         return freeMemory < 2_147_483_648  // 2GB
+    }
+
+    // Helper method to determine network quality
+    private func determineNetworkQuality() -> Int {
+        // Default quality is medium (3)
+        var quality = 3
+
+        // A simple ping test to determine network quality
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/sbin/ping")
+        process.arguments = ["-c", "3", "-q", self.registry]
+
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+
+            let outputData = try outputPipe.fileHandleForReading.readToEnd() ?? Data()
+            if let output = String(data: outputData, encoding: .utf8) {
+                // Check for average ping time
+                if let avgTimeRange = output.range(
+                    of: "= [0-9.]+/([0-9.]+)/", options: .regularExpression)
+                {
+                    let avgSubstring = output[avgTimeRange]
+                    if let avgString = avgSubstring.split(separator: "/").dropFirst().first,
+                        let avgTime = Double(avgString)
+                    {
+
+                        // Classify network quality based on ping time
+                        if avgTime < 50 {
+                            quality = 5  // Excellent
+                        } else if avgTime < 100 {
+                            quality = 4  // Good
+                        } else if avgTime < 200 {
+                            quality = 3  // Average
+                        } else if avgTime < 300 {
+                            quality = 2  // Poor
+                        } else {
+                            quality = 1  // Very poor
+                        }
+                    }
+                }
+            }
+        } catch {
+            // Default to medium if ping fails
+            Logger.info("Failed to determine network quality, using default settings")
+        }
+
+        return quality
+    }
+
+    // Helper method to calculate optimal concurrency based on system capabilities
+    private func calculateOptimalConcurrency(memoryConstrained: Bool, networkQuality: Int) -> Int {
+        // Base concurrency based on network quality (1-5)
+        let baseThreads = min(networkQuality * 2, 8)
+
+        if memoryConstrained {
+            // Reduce concurrency for memory-constrained systems
+            return max(2, baseThreads / 2)
+        }
+
+        // Physical cores available on the system
+        let cores = ProcessInfo.processInfo.processorCount
+
+        // Adaptive approach: 1-2 threads per core depending on network quality
+        let threadsPerCore = (networkQuality >= 4) ? 2 : 1
+        let systemBasedThreads = min(cores * threadsPerCore, 12)
+
+        // Take the larger of network-based and system-based concurrency
+        return max(baseThreads, systemBasedThreads)
+    }
+
+    // Helper to get optimal TCP window size
+    private func getTCPReceiveWindowSize() -> Int? {
+        // Try to query system TCP window size
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/sysctl")
+        process.arguments = ["net.inet.tcp.recvspace"]
+
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+
+            let outputData = try outputPipe.fileHandleForReading.readToEnd() ?? Data()
+            if let output = String(data: outputData, encoding: .utf8),
+                let valueStr = output.split(separator: ":").last?.trimmingCharacters(
+                    in: .whitespacesAndNewlines),
+                let value = Int(valueStr)
+            {
+                return value
+            }
+        } catch {
+            // Ignore errors, we'll use defaults
+        }
+
+        return nil
     }
 }

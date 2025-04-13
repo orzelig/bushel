@@ -27,6 +27,7 @@ enum PullError: Error, LocalizedError {
     case layerDownloadFailed(String)
     case missingPart(Int)
     case decompressionFailed(String)
+    case reassemblyFailed(String)
     
     var errorDescription: String? {
         switch self {
@@ -42,6 +43,8 @@ enum PullError: Error, LocalizedError {
             return "Missing disk image part \(number)"
         case .decompressionFailed(let filename):
             return "Failed to decompress file: \(filename)"
+        case .reassemblyFailed(let reason):
+            return "Disk image reassembly failed: \(reason)."
         }
     }
 }
