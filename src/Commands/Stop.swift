@@ -8,13 +8,16 @@ struct Stop: AsyncParsableCommand {
 
     @Argument(help: "Name of the virtual machine", completion: .custom(completeVMName))
     var name: String
-    
+
+    @Option(name: .customLong("storage"), help: "VM storage location to use")
+    var storage: String?
+
     init() {
     }
 
     @MainActor
     func run() async throws {
         let vmController = LumeController()
-        try await vmController.stopVM(name: name)
+        try await vmController.stopVM(name: name, storage: storage)
     }
 }

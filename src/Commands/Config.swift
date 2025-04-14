@@ -5,7 +5,7 @@ struct Config: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "config",
         abstract: "Get or set lume configuration",
-        subcommands: [Get.self, Location.self, Cache.self],
+        subcommands: [Get.self, Storage.self, Cache.self, Caching.self],
         defaultSubcommand: Get.self
     )
 
@@ -23,20 +23,77 @@ struct Config: ParsableCommand {
 
             // Display default location
             print(
-                "Default VM location: \(settings.defaultLocationName) (\(settings.defaultLocation?.path ?? "not set"))"
+                "Default VM storage: \(settings.defaultLocationName) (\(settings.defaultLocation?.path ?? "not set"))"
             )
 
             // Display cache directory
             print("Cache directory: \(settings.cacheDirectory)")
 
+            // Display caching enabled status
+            print("Caching enabled: \(settings.cachingEnabled)")
+
             // Display all locations
             if !settings.vmLocations.isEmpty {
-                print("\nConfigured VM locations:")
+                print("\nConfigured VM storage locations:")
                 for location in settings.sortedLocations {
                     let isDefault = location.name == settings.defaultLocationName
                     let defaultMark = isDefault ? " (default)" : ""
                     print("  - \(location.name): \(location.path)\(defaultMark)")
                 }
+            }
+        }
+    }
+
+    // MARK: - Debug Command
+
+    struct Debug: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "debug",
+            abstract: "Output detailed debug information about current configuration",
+            shouldDisplay: false
+        )
+
+        func run() throws {
+            let debugInfo = SettingsManager.shared.debugSettings()
+            print(debugInfo)
+        }
+    }
+
+    // MARK: - Caching Management Subcommands
+
+    struct Caching: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "caching",
+            abstract: "Manage image caching settings",
+            subcommands: [GetCaching.self, SetCaching.self]
+        )
+
+        struct GetCaching: ParsableCommand {
+            static let configuration = CommandConfiguration(
+                commandName: "get",
+                abstract: "Show current caching status"
+            )
+
+            func run() throws {
+                let controller = LumeController()
+                let cachingEnabled = controller.isCachingEnabled()
+                print("Caching enabled: \(cachingEnabled)")
+            }
+        }
+
+        struct SetCaching: ParsableCommand {
+            static let configuration = CommandConfiguration(
+                commandName: "set",
+                abstract: "Enable or disable image caching"
+            )
+
+            @Argument(help: "Enable or disable caching (true/false)")
+            var enabled: Bool
+
+            func run() throws {
+                let controller = LumeController()
+                try controller.setCachingEnabled(enabled)
+                print("Caching \(enabled ? "enabled" : "disabled")")
             }
         }
     }
@@ -80,54 +137,54 @@ struct Config: ParsableCommand {
         }
     }
 
-    // MARK: - Location Management Subcommands
+    // MARK: - Storage Management Subcommands
 
-    struct Location: ParsableCommand {
+    struct Storage: ParsableCommand {
         static let configuration = CommandConfiguration(
-            commandName: "location",
-            abstract: "Manage VM locations",
+            commandName: "storage",
+            abstract: "Manage VM storage locations",
             subcommands: [Add.self, Remove.self, List.self, Default.self]
         )
 
         struct Add: ParsableCommand {
             static let configuration = CommandConfiguration(
                 commandName: "add",
-                abstract: "Add a new VM location"
+                abstract: "Add a new VM storage location"
             )
 
-            @Argument(help: "Location name (alphanumeric with dashes/underscores)")
+            @Argument(help: "Storage name (alphanumeric with dashes/underscores)")
             var name: String
 
-            @Argument(help: "Path to VM location directory")
+            @Argument(help: "Path to VM storage directory")
             var path: String
 
             func run() throws {
                 let controller = LumeController()
                 try controller.addLocation(name: name, path: path)
-                print("Added VM location: \(name) at \(path)")
+                print("Added VM storage location: \(name) at \(path)")
             }
         }
 
         struct Remove: ParsableCommand {
             static let configuration = CommandConfiguration(
                 commandName: "remove",
-                abstract: "Remove a VM location"
+                abstract: "Remove a VM storage location"
             )
 
-            @Argument(help: "Location name to remove")
+            @Argument(help: "Storage name to remove")
             var name: String
 
             func run() throws {
                 let controller = LumeController()
                 try controller.removeLocation(name: name)
-                print("Removed VM location: \(name)")
+                print("Removed VM storage location: \(name)")
             }
         }
 
         struct List: ParsableCommand {
             static let configuration = CommandConfiguration(
                 commandName: "list",
-                abstract: "List all VM locations"
+                abstract: "List all VM storage locations"
             )
 
             func run() throws {
@@ -135,11 +192,11 @@ struct Config: ParsableCommand {
                 let settings = controller.getSettings()
 
                 if settings.vmLocations.isEmpty {
-                    print("No VM locations configured")
+                    print("No VM storage locations configured")
                     return
                 }
 
-                print("VM Locations:")
+                print("VM Storage Locations:")
                 for location in settings.sortedLocations {
                     let isDefault = location.name == settings.defaultLocationName
                     let defaultMark = isDefault ? " (default)" : ""
@@ -151,16 +208,16 @@ struct Config: ParsableCommand {
         struct Default: ParsableCommand {
             static let configuration = CommandConfiguration(
                 commandName: "default",
-                abstract: "Set the default VM location"
+                abstract: "Set the default VM storage location"
             )
 
-            @Argument(help: "Location name to set as default")
+            @Argument(help: "Storage name to set as default")
             var name: String
 
             func run() throws {
                 let controller = LumeController()
                 try controller.setDefaultLocation(name: name)
-                print("Set default VM location to: \(name)")
+                print("Set default VM storage location to: \(name)")
             }
         }
     }

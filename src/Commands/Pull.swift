@@ -19,8 +19,8 @@ struct Pull: AsyncParsableCommand {
     @Option(help: "Organization to pull from. Defaults to trycua")
     var organization: String = "trycua"
 
-    @Option(name: .customLong("location"), help: "VM location to use")
-    var location: String?
+    @Option(name: .customLong("storage"), help: "VM storage location to use")
+    var storage: String?
 
     init() {}
 
@@ -32,7 +32,7 @@ struct Pull: AsyncParsableCommand {
             name: name,
             registry: registry,
             organization: organization,
-            locationName: location
+            storage: storage
         )
     }
 }

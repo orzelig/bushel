@@ -21,6 +21,9 @@ struct Set: AsyncParsableCommand {
     @Option(help: "New display resolution in format WIDTHxHEIGHT.")
     var display: VMDisplayResolution?
 
+    @Option(name: .customLong("storage"), help: "VM storage location to use")
+    var storage: String?
+
     init() {
     }
 
@@ -32,7 +35,8 @@ struct Set: AsyncParsableCommand {
             cpu: cpu,
             memory: memory,
             diskSize: diskSize,
-            display: display?.string
+            display: display?.string,
+            storage: storage
         )
     }
 }

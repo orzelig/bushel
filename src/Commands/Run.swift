@@ -28,6 +28,12 @@ struct Run: AsyncParsableCommand {
         completion: .file())
     var mount: String?
 
+    @Option(
+        name: [.customLong("usb-storage")],
+        help: "Disk image to attach as a USB mass storage device (e.g. --usb-storage=\"disk.img\")",
+        completion: .file())
+    var usbStorageDevices: [String] = []
+
     @Option(help: "Github Container Registry to pull the images from. Defaults to ghcr.io")
     var registry: String = "ghcr.io"
 
@@ -42,8 +48,8 @@ struct Run: AsyncParsableCommand {
     @Option(help: "For MacOS VMs only, boot into the VM in recovery mode")
     var recoveryMode: Bool = false
 
-    @Option(name: .customLong("location"), help: "VM location to use")
-    var location: String?
+    @Option(name: .customLong("storage"), help: "VM storage location to use")
+    var storage: String?
 
     private var parsedSharedDirectories: [SharedDirectory] {
         get throws {
@@ -83,6 +89,10 @@ struct Run: AsyncParsableCommand {
         }
     }
 
+    private var parsedUSBStorageDevices: [Path] {
+        usbStorageDevices.map { Path($0) }
+    }
+
     init() {
     }
 
@@ -97,7 +107,8 @@ struct Run: AsyncParsableCommand {
             organization: organization,
             vncPort: vncPort,
             recoveryMode: recoveryMode,
-            locationName: location
+            storage: storage,
+            usbMassStoragePaths: parsedUSBStorageDevices.isEmpty ? nil : parsedUSBStorageDevices
         )
     }
 }

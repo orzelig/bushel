@@ -64,19 +64,20 @@ final class Home {
         }
     }
 
-    /// Returns a VMDirectory instance for the given name and location
+    /// Gets a VM directory for a specific VM name and optional location
+    ///
     /// - Parameters:
     ///   - name: Name of the VM directory
-    ///   - locationName: Optional name of the VM location (default: default location)
+    ///   - storage: Optional name of the VM location (default: default location)
     /// - Returns: A VMDirectory instance
     /// - Throws: HomeError if location not found
-    func getVMDirectory(_ name: String, locationName: String? = nil) throws -> VMDirectory {
+    func getVMDirectory(_ name: String, storage: String? = nil) throws -> VMDirectory {
         let location: VMLocation
 
-        if let locationName = locationName {
+        if let storage = storage {
             // Get a specific location
-            guard let loc = locations[locationName] else {
-                throw VMLocationError.locationNotFound(name: locationName)
+            guard let loc = locations[storage] else {
+                throw VMLocationError.locationNotFound(name: storage)
             }
             location = loc
         } else {
@@ -154,8 +155,8 @@ final class Home {
         sourceLocation: String? = nil,
         destLocation: String? = nil
     ) throws {
-        let sourceDir = try getVMDirectory(sourceName, locationName: sourceLocation)
-        let destDir = try getVMDirectory(destName, locationName: destLocation)
+        let sourceDir = try getVMDirectory(sourceName, storage: sourceLocation)
+        let destDir = try getVMDirectory(destName, storage: destLocation)
 
         if destDir.initialized() {
             throw HomeError.directoryAlreadyExists(path: destDir.dir.path)

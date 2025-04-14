@@ -2,11 +2,70 @@
 
 ### Where are the VMs stored?
 
-VMs are stored in `~/.lume`.
+VMs are stored in `~/.lume` by default. You can configure additional storage locations using the `lume config` command.
 
 ### How are images cached?
 
 Images are cached in `~/.lume/cache`. When doing `lume pull <image>`, it will check if the image is already cached. If not, it will download the image and cache it, removing any older versions.
+
+### Where is the configuration file stored?
+
+Lume follows the XDG Base Directory specification for the configuration file:
+
+- Configuration is stored in `$XDG_CONFIG_HOME/lume/config.yaml` (defaults to `~/.config/lume/config.yaml`)
+
+By default, other data is stored in:
+- VM data: `~/.lume`
+- Cache files: `~/.lume/cache`
+
+The config file contains settings for:
+- VM storage locations and the default location
+- Cache directory location
+- Whether caching is enabled
+
+You can view and modify these settings using the `lume config` commands:
+
+```bash
+# View current configuration
+lume config get
+
+# Manage VM storage locations
+lume config storage list                 # List all VM storage locations
+lume config storage add <name> <path>    # Add a new VM storage location
+lume config storage remove <name>        # Remove a VM storage location
+lume config storage default <name>       # Set the default VM storage location
+
+# Manage cache settings
+lume config cache get                    # Get current cache directory
+lume config cache set <path>             # Set cache directory
+
+# Manage image caching settings
+lume config caching get                  # Show current caching status
+lume config caching set <boolean>        # Enable or disable image caching
+```
+
+### How do I use multiple VM storage locations?
+
+Lume supports storing VMs in different locations (e.g., internal drive, external SSD). After configuring storage locations, you can specify which location to use with the `--storage` parameter in various commands:
+
+```bash
+# Create a VM in a specific storage location
+lume create my-vm --os macos --ipsw latest --storage ssd
+
+# Run a VM from a specific storage location
+lume run my-vm --storage ssd
+
+# Delete a VM from a specific storage location
+lume delete my-vm --storage ssd
+
+# Pull an image to a specific storage location
+lume pull macos-sequoia-vanilla:latest --name my-vm --storage ssd
+
+# Clone a VM between storage locations
+lume clone source-vm cloned-vm --source-storage default --dest-storage ssd
+```
+
+If you don't specify a storage location, Lume will use the default one or search across all configured locations.
 
 ### Are VM disks taking up all the disk space?
 

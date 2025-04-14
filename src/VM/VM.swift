@@ -7,6 +7,7 @@ struct VMDirContext {
     let dir: VMDirectory
     var config: VMConfig
     let home: Home
+    let storage: String?
 
     func saveConfig() throws {
         try dir.saveConfig(config)
@@ -88,7 +89,8 @@ class VM {
             status: isRunning ? "running" : "stopped",
             vncUrl: vncUrl,
             ipAddress: isRunning
-                ? DHCPLeaseParser.getIPAddress(forMAC: vmDirContext.config.macAddress!) : nil
+                ? DHCPLeaseParser.getIPAddress(forMAC: vmDirContext.config.macAddress!) : nil,
+            locationName: vmDirContext.storage ?? "default"
         )
     }
 
@@ -96,7 +98,7 @@ class VM {
 
     func run(
         noDisplay: Bool, sharedDirectories: [SharedDirectory], mount: Path?, vncPort: Int = 0,
-        recoveryMode: Bool = false
+        recoveryMode: Bool = false, usbMassStoragePaths: [Path]? = nil
     ) async throws {
         guard vmDirContext.initialized else {
             throw VMError.notInitialized(vmDirContext.name)
@@ -126,6 +128,23 @@ class VM {
                 ).joined(separator: ", "),
                 "vncPort": "\(vncPort)",
                 "recoveryMode": "\(recoveryMode)",
+                "usbMassStorageDeviceCount": "\(usbMassStoragePaths?.count ?? 0)",
+            ])
+
+        // Log disk paths and existence for debugging
+        Logger.info(
+            "VM disk paths",
+            metadata: [
+                "diskPath": vmDirContext.diskPath.path,
+                "diskExists":
+                    "\(FileManager.default.fileExists(atPath: vmDirContext.diskPath.path))",
+                "nvramPath": vmDirContext.nvramPath.path,
+                "nvramExists":
+                    "\(FileManager.default.fileExists(atPath: vmDirContext.nvramPath.path))",
+                "configPath": vmDirContext.dir.configPath.path,
+                "configExists":
+                    "\(FileManager.default.fileExists(atPath: vmDirContext.dir.configPath.path))",
+                "locationName": vmDirContext.storage ?? "default",
             ])
 
         // Create and configure the VM
@@ -136,7 +155,8 @@ class VM {
                 display: vmDirContext.config.display.string,
                 sharedDirectories: sharedDirectories,
                 mount: mount,
-                recoveryMode: recoveryMode
+                recoveryMode: recoveryMode,
+                usbMassStoragePaths: usbMassStoragePaths
             )
             virtualizationService = try virtualizationServiceFactory(config)
 
@@ -153,6 +173,12 @@ class VM {
                 try await Task.sleep(nanoseconds: UInt64(1e9))
             }
         } catch {
+            Logger.error(
+                "Failed to create/start VM",
+                metadata: [
+                    "error": "\(error)",
+                    "errorType": "\(type(of: error))",
+                ])
             virtualizationService = nil
             vncService.stop()
             // Release lock
@@ -396,8 +422,12 @@ class VM {
         display: String,
         sharedDirectories: [SharedDirectory] = [],
         mount: Path? = nil,
-        recoveryMode: Bool = false
+        recoveryMode: Bool = false,
+        usbMassStoragePaths: [Path]? = nil
     ) throws -> VMVirtualizationServiceContext {
+        // This is a diagnostic log to track actual file paths on disk for debugging
+        try validateDiskState()
+
         return VMVirtualizationServiceContext(
             cpuCount: cpuCount,
             memorySize: memorySize,
@@ -409,8 +439,52 @@ class VM {
             macAddress: vmDirContext.config.macAddress!,
             diskPath: vmDirContext.diskPath,
             nvramPath: vmDirContext.nvramPath,
-            recoveryMode: recoveryMode
+            recoveryMode: recoveryMode,
+            usbMassStoragePaths: usbMassStoragePaths
         )
+    }
+
+    /// Validates the disk state to help diagnose storage attachment issues
+    private func validateDiskState() throws {
+        // Check disk image state
+        let diskPath = vmDirContext.diskPath.path
+        let diskExists = FileManager.default.fileExists(atPath: diskPath)
+        var diskSize: UInt64 = 0
+        var diskPermissions = ""
+
+        if diskExists {
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: diskPath) {
+                diskSize = attrs[.size] as? UInt64 ?? 0
+                let posixPerms = attrs[.posixPermissions] as? Int ?? 0
+                diskPermissions = String(format: "%o", posixPerms)
+            }
+        }
+
+        // Check disk container directory permissions
+        let diskDir = (diskPath as NSString).deletingLastPathComponent
+        let dirPerms =
+            try? FileManager.default.attributesOfItem(atPath: diskDir)[.posixPermissions] as? Int
+            ?? 0
+        let dirPermsString = dirPerms != nil ? String(format: "%o", dirPerms!) : "unknown"
+
+        // Log detailed diagnostics
+        Logger.info(
+            "Validating VM disk state",
+            metadata: [
+                "diskPath": diskPath,
+                "diskExists": "\(diskExists)",
+                "diskSize":
+                    "\(ByteCountFormatter.string(fromByteCount: Int64(diskSize), countStyle: .file))",
+                "diskPermissions": diskPermissions,
+                "dirPermissions": dirPermsString,
+                "locationName": vmDirContext.storage ?? "default",
+            ])
+
+        if !diskExists {
+            Logger.error("VM disk image does not exist", metadata: ["diskPath": diskPath])
+        } else if diskSize == 0 {
+            Logger.error("VM disk image exists but has zero size", metadata: ["diskPath": diskPath])
+        }
     }
 
     func setup(
@@ -426,8 +500,81 @@ class VM {
     // MARK: - Finalization
 
     /// Post-installation step to move the VM directory to the home directory
-    func finalize(to name: String, home: Home, locationName: String? = nil) throws {
-        let vmDir = try home.getVMDirectory(name, locationName: locationName)
+    func finalize(to name: String, home: Home, storage: String? = nil) throws {
+        let vmDir = try home.getVMDirectory(name, storage: storage)
         try FileManager.default.moveItem(at: vmDirContext.dir.dir.url, to: vmDir.dir.url)
+    }
+
+    // Method to run VM with additional USB mass storage devices
+    func runWithUSBStorage(
+        noDisplay: Bool, sharedDirectories: [SharedDirectory], mount: Path?, vncPort: Int = 0,
+        recoveryMode: Bool = false, usbImagePaths: [Path]
+    ) async throws {
+        guard vmDirContext.initialized else {
+            throw VMError.notInitialized(vmDirContext.name)
+        }
+
+        guard let cpuCount = vmDirContext.config.cpuCount,
+            let memorySize = vmDirContext.config.memorySize
+        else {
+            throw VMError.notInitialized(vmDirContext.name)
+        }
+
+        // Try to acquire lock on config file
+        let fileHandle = try FileHandle(forWritingTo: vmDirContext.dir.configPath.url)
+        guard flock(fileHandle.fileDescriptor, LOCK_EX | LOCK_NB) == 0 else {
+            try? fileHandle.close()
+            throw VMError.alreadyRunning(vmDirContext.name)
+        }
+
+        Logger.info(
+            "Running VM with USB storage devices",
+            metadata: [
+                "cpuCount": "\(cpuCount)",
+                "memorySize": "\(memorySize)",
+                "diskSize": "\(vmDirContext.config.diskSize ?? 0)",
+                "usbImageCount": "\(usbImagePaths.count)",
+                "recoveryMode": "\(recoveryMode)",
+            ])
+
+        // Create and configure the VM
+        do {
+            let config = try createVMVirtualizationServiceContext(
+                cpuCount: cpuCount,
+                memorySize: memorySize,
+                display: vmDirContext.config.display.string,
+                sharedDirectories: sharedDirectories,
+                mount: mount,
+                recoveryMode: recoveryMode,
+                usbMassStoragePaths: usbImagePaths
+            )
+            virtualizationService = try virtualizationServiceFactory(config)
+
+            let vncInfo = try await setupVNC(noDisplay: noDisplay, port: vncPort)
+            Logger.info("VNC info", metadata: ["vncInfo": vncInfo])
+
+            // Start the VM
+            guard let service = virtualizationService else {
+                throw VMError.internalError("Virtualization service not initialized")
+            }
+            try await service.start()
+
+            while true {
+                try await Task.sleep(nanoseconds: UInt64(1e9))
+            }
+        } catch {
+            Logger.error(
+                "Failed to create/start VM with USB storage",
+                metadata: [
+                    "error": "\(error)",
+                    "errorType": "\(type(of: error))",
+                ])
+            virtualizationService = nil
+            vncService.stop()
+            // Release lock
+            flock(fileHandle.fileDescriptor, LOCK_UN)
+            try? fileHandle.close()
+            throw error
+        }
     }
 }

@@ -14,6 +14,7 @@ struct VMVirtualizationServiceContext {
     let diskPath: Path
     let nvramPath: Path
     let recoveryMode: Bool
+    let usbMassStoragePaths: [Path]?
 }
 
 /// Protocol defining the interface for virtualization operations
@@ -32,18 +33,19 @@ protocol VMVirtualizationService {
 class BaseVirtualizationService: VMVirtualizationService {
     let virtualMachine: VZVirtualMachine
     let recoveryMode: Bool  // Store whether we should start in recovery mode
-    
+
     var state: VZVirtualMachine.State {
         virtualMachine.state
     }
-    
+
     init(virtualMachine: VZVirtualMachine, recoveryMode: Bool = false) {
         self.virtualMachine = virtualMachine
         self.recoveryMode = recoveryMode
     }
-    
+
     func start() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
             Task { @MainActor in
                 if #available(macOS 13, *) {
                     let startOptions = VZMacOSVirtualMachineStartOptions()
@@ -74,7 +76,8 @@ class BaseVirtualizationService: VMVirtualizationService {
     }
 
     func stop() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
             virtualMachine.stop { error in
                 if let error = error {
                     continuation.resume(throwing: error)
@@ -84,9 +87,10 @@ class BaseVirtualizationService: VMVirtualizationService {
             }
         }
     }
-    
+
     func pause() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
             virtualMachine.start { result in
                 switch result {
                 case .success:
@@ -97,9 +101,10 @@ class BaseVirtualizationService: VMVirtualizationService {
             }
         }
     }
-    
+
     func resume() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
             virtualMachine.start { result in
                 switch result {
                 case .success:
@@ -110,13 +115,15 @@ class BaseVirtualizationService: VMVirtualizationService {
             }
         }
     }
-    
+
     func getVirtualMachine() -> Any {
         return virtualMachine
     }
-    
+
     // Helper methods for creating common configurations
-    static func createStorageDeviceConfiguration(diskPath: Path, readOnly: Bool = false) throws -> VZStorageDeviceConfiguration {
+    static func createStorageDeviceConfiguration(diskPath: Path, readOnly: Bool = false) throws
+        -> VZStorageDeviceConfiguration
+    {
         return VZVirtioBlockDeviceConfiguration(
             attachment: try VZDiskImageStorageDeviceAttachment(
                 url: diskPath.url,
@@ -126,8 +133,29 @@ class BaseVirtualizationService: VMVirtualizationService {
             )
         )
     }
-    
-    static func createNetworkDeviceConfiguration(macAddress: String) throws -> VZNetworkDeviceConfiguration {
+
+    static func createUSBMassStorageDeviceConfiguration(diskPath: Path, readOnly: Bool = false)
+        throws
+        -> VZStorageDeviceConfiguration
+    {
+        if #available(macOS 15.0, *) {
+            return VZUSBMassStorageDeviceConfiguration(
+                attachment: try VZDiskImageStorageDeviceAttachment(
+                    url: diskPath.url,
+                    readOnly: readOnly,
+                    cachingMode: VZDiskImageCachingMode.automatic,
+                    synchronizationMode: VZDiskImageSynchronizationMode.fsync
+                )
+            )
+        } else {
+            // Fallback to normal storage device if USB mass storage not available
+            return try createStorageDeviceConfiguration(diskPath: diskPath, readOnly: readOnly)
+        }
+    }
+
+    static func createNetworkDeviceConfiguration(macAddress: String) throws
+        -> VZNetworkDeviceConfiguration
+    {
         let network = VZVirtioNetworkDeviceConfiguration()
         guard let vzMacAddress = VZMACAddress(string: macAddress) else {
             throw VMConfigError.invalidMachineIdentifier
@@ -136,12 +164,15 @@ class BaseVirtualizationService: VMVirtualizationService {
         network.macAddress = vzMacAddress
         return network
     }
-    
-    static func createDirectorySharingDevices(sharedDirectories: [SharedDirectory]?) -> [VZDirectorySharingDeviceConfiguration] {
+
+    static func createDirectorySharingDevices(sharedDirectories: [SharedDirectory]?)
+        -> [VZDirectorySharingDeviceConfiguration]
+    {
         return sharedDirectories?.map { sharedDir in
             let device = VZVirtioFileSystemDeviceConfiguration(tag: sharedDir.tag)
             let url = URL(fileURLWithPath: sharedDir.hostPath)
-            device.share = VZSingleDirectoryShare(directory: VZSharedDirectory(url: url, readOnly: sharedDir.readOnly))
+            device.share = VZSingleDirectoryShare(
+                directory: VZSharedDirectory(url: url, readOnly: sharedDir.readOnly))
             return device
         } ?? []
     }
@@ -150,7 +181,9 @@ class BaseVirtualizationService: VMVirtualizationService {
 /// macOS-specific virtualization service
 @MainActor
 final class DarwinVirtualizationService: BaseVirtualizationService {
-    static func createConfiguration(_ config: VMVirtualizationServiceContext) throws -> VZVirtualMachineConfiguration {
+    static func createConfiguration(_ config: VMVirtualizationServiceContext) throws
+        -> VZVirtualMachineConfiguration
+    {
         let vzConfig = VZVirtualMachineConfiguration()
         vzConfig.cpuCount = config.cpuCount
         vzConfig.memorySize = config.memorySize
@@ -163,7 +196,7 @@ final class DarwinVirtualizationService: BaseVirtualizationService {
         guard let hardwareModel = config.hardwareModel else {
             throw VMConfigError.emptyHardwareModel
         }
-        
+
         let platform = VZMacPlatformConfiguration()
         platform.auxiliaryStorage = VZMacAuxiliaryStorage(url: config.nvramPath.url)
         Logger.info("Pre-VZMacHardwareModel: hardwareModel=\(hardwareModel)")
@@ -171,7 +204,9 @@ final class DarwinVirtualizationService: BaseVirtualizationService {
             throw VMConfigError.invalidHardwareModel
         }
         platform.hardwareModel = vzHardwareModel
-        guard let vzMachineIdentifier = VZMacMachineIdentifier(dataRepresentation: machineIdentifier) else {
+        guard
+            let vzMachineIdentifier = VZMacMachineIdentifier(dataRepresentation: machineIdentifier)
+        else {
             throw VMConfigError.invalidMachineIdentifier
         }
         platform.machineIdentifier = vzMachineIdentifier
@@ -195,59 +230,83 @@ final class DarwinVirtualizationService: BaseVirtualizationService {
         vzConfig.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
         var storageDevices = [try createStorageDeviceConfiguration(diskPath: config.diskPath)]
         if let mount = config.mount {
-            storageDevices.append(try createStorageDeviceConfiguration(diskPath: mount, readOnly: true))
+            storageDevices.append(
+                try createStorageDeviceConfiguration(diskPath: mount, readOnly: true))
+        }
+        // Add USB mass storage devices if specified
+        if #available(macOS 15.0, *), let usbPaths = config.usbMassStoragePaths, !usbPaths.isEmpty {
+            for usbPath in usbPaths {
+                storageDevices.append(
+                    try createUSBMassStorageDeviceConfiguration(diskPath: usbPath, readOnly: true))
+            }
         }
         vzConfig.storageDevices = storageDevices
-        vzConfig.networkDevices = [try createNetworkDeviceConfiguration(macAddress: config.macAddress)]
+        vzConfig.networkDevices = [
+            try createNetworkDeviceConfiguration(macAddress: config.macAddress)
+        ]
         vzConfig.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
         vzConfig.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
-        
+
         // Directory sharing
-        let directorySharingDevices = createDirectorySharingDevices(sharedDirectories: config.sharedDirectories)
+        let directorySharingDevices = createDirectorySharingDevices(
+            sharedDirectories: config.sharedDirectories)
         if !directorySharingDevices.isEmpty {
             vzConfig.directorySharingDevices = directorySharingDevices
+        }
+
+        // USB Controller configuration
+        if #available(macOS 15.0, *) {
+            let usbControllerConfiguration = VZXHCIControllerConfiguration()
+            vzConfig.usbControllers = [usbControllerConfiguration]
         }
 
         try vzConfig.validate()
         return vzConfig
     }
-    
+
     static func generateMacAddress() -> String {
         VZMACAddress.randomLocallyAdministered().string
     }
-    
+
     static func generateMachineIdentifier() -> Data {
         VZMacMachineIdentifier().dataRepresentation
     }
-    
+
     func createAuxiliaryStorage(at path: Path, hardwareModel: Data) throws {
         guard let vzHardwareModel = VZMacHardwareModel(dataRepresentation: hardwareModel) else {
             throw VMConfigError.invalidHardwareModel
         }
         _ = try VZMacAuxiliaryStorage(creatingStorageAt: path.url, hardwareModel: vzHardwareModel)
     }
-    
+
     init(configuration: VMVirtualizationServiceContext) throws {
         let vzConfig = try Self.createConfiguration(configuration)
-        super.init(virtualMachine: VZVirtualMachine(configuration: vzConfig), recoveryMode: configuration.recoveryMode)
+        super.init(
+            virtualMachine: VZVirtualMachine(configuration: vzConfig),
+            recoveryMode: configuration.recoveryMode)
     }
-    
-    func installMacOS(imagePath: Path, progressHandler: (@Sendable (Double) -> Void)?) async throws {
+
+    func installMacOS(imagePath: Path, progressHandler: (@Sendable (Double) -> Void)?) async throws
+    {
         var observers: [NSKeyValueObservation] = []  // must hold observer references during installation to print process
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
             Task {
-                let installer = VZMacOSInstaller(virtualMachine: virtualMachine, restoringFromImageAt: imagePath.url)
+                let installer = VZMacOSInstaller(
+                    virtualMachine: virtualMachine, restoringFromImageAt: imagePath.url)
                 Logger.info("Starting macOS installation")
-                
+
                 if let progressHandler = progressHandler {
-                    let observer = installer.progress.observe(\.fractionCompleted, options: [.initial, .new]) { (progress, change) in
+                    let observer = installer.progress.observe(
+                        \.fractionCompleted, options: [.initial, .new]
+                    ) { (progress, change) in
                         if let newValue = change.newValue {
                             progressHandler(newValue)
                         }
                     }
                     observers.append(observer)
                 }
-                
+
                 installer.install { result in
                     switch result {
                     case .success:
@@ -266,7 +325,9 @@ final class DarwinVirtualizationService: BaseVirtualizationService {
 /// Linux-specific virtualization service
 @MainActor
 final class LinuxVirtualizationService: BaseVirtualizationService {
-    static func createConfiguration(_ config: VMVirtualizationServiceContext) throws -> VZVirtualMachineConfiguration {
+    static func createConfiguration(_ config: VMVirtualizationServiceContext) throws
+        -> VZVirtualMachineConfiguration
+    {
         let vzConfig = VZVirtualMachineConfiguration()
         vzConfig.cpuCount = config.cpuCount
         vzConfig.memorySize = config.memorySize
@@ -274,10 +335,11 @@ final class LinuxVirtualizationService: BaseVirtualizationService {
         // Platform configuration
         let platform = VZGenericPlatformConfiguration()
         if #available(macOS 15, *) {
-            platform.isNestedVirtualizationEnabled = VZGenericPlatformConfiguration.isNestedVirtualizationSupported
+            platform.isNestedVirtualizationEnabled =
+                VZGenericPlatformConfiguration.isNestedVirtualizationSupported
         }
         vzConfig.platform = platform
-        
+
         let bootLoader = VZEFIBootLoader()
         bootLoader.variableStore = VZEFIVariableStore(url: config.nvramPath.url)
         vzConfig.bootLoader = bootLoader
@@ -298,16 +360,27 @@ final class LinuxVirtualizationService: BaseVirtualizationService {
         vzConfig.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
         var storageDevices = [try createStorageDeviceConfiguration(diskPath: config.diskPath)]
         if let mount = config.mount {
-            storageDevices.append(try createStorageDeviceConfiguration(diskPath: mount, readOnly: true))
+            storageDevices.append(
+                try createStorageDeviceConfiguration(diskPath: mount, readOnly: true))
+        }
+        // Add USB mass storage devices if specified
+        if #available(macOS 15.0, *), let usbPaths = config.usbMassStoragePaths, !usbPaths.isEmpty {
+            for usbPath in usbPaths {
+                storageDevices.append(
+                    try createUSBMassStorageDeviceConfiguration(diskPath: usbPath, readOnly: true))
+            }
         }
         vzConfig.storageDevices = storageDevices
-        vzConfig.networkDevices = [try createNetworkDeviceConfiguration(macAddress: config.macAddress)]
+        vzConfig.networkDevices = [
+            try createNetworkDeviceConfiguration(macAddress: config.macAddress)
+        ]
         vzConfig.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
         vzConfig.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
-        
+
         // Directory sharing
-        var directorySharingDevices = createDirectorySharingDevices(sharedDirectories: config.sharedDirectories)
-        
+        var directorySharingDevices = createDirectorySharingDevices(
+            sharedDirectories: config.sharedDirectories)
+
         // Add Rosetta support if available
         if #available(macOS 13.0, *) {
             if VZLinuxRosettaDirectoryShare.availability == .installed {
@@ -324,23 +397,29 @@ final class LinuxVirtualizationService: BaseVirtualizationService {
                 Logger.info("Rosetta not installed, skipping Rosetta support")
             }
         }
-        
+
         if !directorySharingDevices.isEmpty {
             vzConfig.directorySharingDevices = directorySharingDevices
+        }
+
+        // USB Controller configuration
+        if #available(macOS 15.0, *) {
+            let usbControllerConfiguration = VZXHCIControllerConfiguration()
+            vzConfig.usbControllers = [usbControllerConfiguration]
         }
 
         try vzConfig.validate()
         return vzConfig
     }
-    
+
     func generateMacAddress() -> String {
         VZMACAddress.randomLocallyAdministered().string
     }
-    
+
     func createNVRAM(at path: Path) throws {
         _ = try VZEFIVariableStore(creatingVariableStoreAt: path.url)
     }
-    
+
     init(configuration: VMVirtualizationServiceContext) throws {
         let vzConfig = try Self.createConfiguration(configuration)
         super.init(virtualMachine: VZVirtualMachine(configuration: vzConfig))

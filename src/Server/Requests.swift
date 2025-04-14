@@ -6,6 +6,7 @@ struct RunVMRequest: Codable {
     let noDisplay: Bool?
     let sharedDirectories: [SharedDirectoryRequest]?
     let recoveryMode: Bool?
+    let storage: String?
 
     struct SharedDirectoryRequest: Codable {
         let hostPath: String
@@ -39,9 +40,10 @@ struct PullRequest: Codable {
     let name: String?
     var registry: String
     var organization: String
+    let storage: String?
 
     enum CodingKeys: String, CodingKey {
-        case image, name, registry, organization
+        case image, name, registry, organization, storage
     }
 
     init(from decoder: Decoder) throws {
@@ -50,6 +52,7 @@ struct PullRequest: Codable {
         name = try container.decodeIfPresent(String.self, forKey: .name)
         registry = try container.decodeIfPresent(String.self, forKey: .registry) ?? "ghcr.io"
         organization = try container.decodeIfPresent(String.self, forKey: .organization) ?? "trycua"
+        storage = try container.decodeIfPresent(String.self, forKey: .storage)
     }
 }
 
@@ -61,6 +64,7 @@ struct CreateVMRequest: Codable {
     let diskSize: String
     let display: String
     let ipsw: String?
+    let storage: String?
 
     func parse() throws -> (memory: UInt64, diskSize: UInt64) {
         return (
@@ -75,6 +79,7 @@ struct SetVMRequest: Codable {
     let memory: String?
     let diskSize: String?
     let display: String?
+    let storage: String?
 
     func parse() throws -> (memory: UInt64?, diskSize: UInt64?, display: VMDisplayResolution?) {
         return (
@@ -94,4 +99,6 @@ struct SetVMRequest: Codable {
 struct CloneRequest: Codable {
     let name: String
     let newName: String
+    let sourceLocation: String?
+    let destLocation: String?
 }

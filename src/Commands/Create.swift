@@ -40,8 +40,8 @@ struct Create: AsyncParsableCommand {
     )
     var ipsw: String?
 
-    @Option(name: .customLong("location"), help: "VM location to use")
-    var location: String?
+    @Option(name: .customLong("storage"), help: "VM storage location to use")
+    var storage: String?
 
     init() {
     }
@@ -57,7 +57,7 @@ struct Create: AsyncParsableCommand {
             memorySize: memory,
             display: display.string,
             ipsw: ipsw,
-            locationName: location
+            storage: storage
         )
     }
 }

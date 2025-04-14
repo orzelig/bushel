@@ -57,11 +57,16 @@ actor ProgressTracker {
     private var peakSpeed: Double = 0
     private var totalElapsedTime: TimeInterval = 0
 
+    // Smoothing factor for speed calculation
+    private var speedSmoothing: Double = 0.3
+    private var smoothedSpeed: Double = 0
+
     func setTotal(_ total: Int64, files: Int) {
         totalBytes = total
         totalFiles = files
         startTime = Date()
         lastUpdateTime = startTime
+        smoothedSpeed = 0
     }
 
     func addProgress(_ bytes: Int64) {
@@ -69,9 +74,11 @@ actor ProgressTracker {
         let now = Date()
         let elapsed = now.timeIntervalSince(lastUpdateTime)
 
-        // Only update stats and display progress if enough time has passed (at least 0.5 seconds)
-        if elapsed >= 0.5 {
-            let currentSpeed = Double(downloadedBytes - lastUpdateBytes) / elapsed
+        // Show first progress update immediately, then throttle updates
+        let shouldUpdate = (downloadedBytes <= bytes) || (elapsed >= 0.5)
+
+        if shouldUpdate {
+            let currentSpeed = Double(downloadedBytes - lastUpdateBytes) / max(elapsed, 0.001)
             speedSamples.append(currentSpeed)
 
             // Cap samples array to prevent memory growth
@@ -81,6 +88,13 @@ actor ProgressTracker {
 
             // Update peak speed
             peakSpeed = max(peakSpeed, currentSpeed)
+
+            // Apply exponential smoothing to the speed
+            if smoothedSpeed == 0 {
+                smoothedSpeed = currentSpeed
+            } else {
+                smoothedSpeed = speedSmoothing * currentSpeed + (1 - speedSmoothing) * smoothedSpeed
+            }
 
             // Calculate average speed over the last few samples
             let recentAvgSpeed = calculateAverageSpeed()
@@ -94,6 +108,7 @@ actor ProgressTracker {
                 current: progress,
                 currentSpeed: currentSpeed,
                 averageSpeed: recentAvgSpeed,
+                smoothedSpeed: smoothedSpeed,
                 overallSpeed: overallAvgSpeed,
                 peakSpeed: peakSpeed,
                 context: "Downloading Image"
@@ -108,9 +123,19 @@ actor ProgressTracker {
 
     private func calculateAverageSpeed() -> Double {
         guard !speedSamples.isEmpty else { return 0 }
-        // Use the most recent samples (up to last 5)
-        let samples = speedSamples.suffix(min(5, speedSamples.count))
-        return samples.reduce(0, +) / Double(samples.count)
+
+        // Use weighted average giving more emphasis to recent samples
+        var totalWeight = 0.0
+        var weightedSum = 0.0
+
+        let samples = speedSamples.suffix(min(8, speedSamples.count))
+        for (index, speed) in samples.enumerated() {
+            let weight = Double(index + 1)
+            weightedSum += speed * weight
+            totalWeight += weight
+        }
+
+        return totalWeight > 0 ? weightedSum / totalWeight : 0
     }
 
     func getDownloadStats() -> DownloadStats {
@@ -128,6 +153,7 @@ actor ProgressTracker {
         current: Double,
         currentSpeed: Double,
         averageSpeed: Double,
+        smoothedSpeed: Double,
         overallSpeed: Double,
         peakSpeed: Double,
         context: String
@@ -137,9 +163,11 @@ actor ProgressTracker {
         let avgSpeedStr = formatByteSpeed(averageSpeed)
         let peakSpeedStr = formatByteSpeed(peakSpeed)
 
-        // Calculate ETA based on overall average speed
+        // Calculate ETA based on the smoothed speed which is more stable
+        // This provides a more realistic estimate that doesn't fluctuate as much
         let remainingBytes = totalBytes - downloadedBytes
-        let etaSeconds = overallSpeed > 0 ? Double(remainingBytes) / overallSpeed : 0
+        let speedForEta = max(smoothedSpeed, averageSpeed * 0.8)  // Use the higher of smoothed or 80% of avg
+        let etaSeconds = speedForEta > 0 ? Double(remainingBytes) / speedForEta : 0
         let etaStr = formatTimeRemaining(etaSeconds)
 
         let progressBar = createProgressBar(progress: current)
@@ -249,6 +277,7 @@ class ImageContainerRegistry: @unchecked Sendable {
     private let cacheDirectory: URL
     private let downloadLock = NSLock()
     private var activeDownloads: [String] = []
+    private let cachingEnabled: Bool
 
     init(registry: String, organization: String) {
         self.registry = registry
@@ -259,6 +288,9 @@ class ImageContainerRegistry: @unchecked Sendable {
         let expandedCacheDir = (cacheDir as NSString).expandingTildeInPath
         self.cacheDirectory = URL(fileURLWithPath: expandedCacheDir)
             .appendingPathComponent("ghcr")
+
+        // Get caching enabled setting
+        self.cachingEnabled = SettingsManager.shared.isCachingEnabled()
 
         try? FileManager.default.createDirectory(
             at: cacheDirectory, withIntermediateDirectories: true)
@@ -316,6 +348,11 @@ class ImageContainerRegistry: @unchecked Sendable {
     }
 
     private func validateCache(manifest: Manifest, manifestId: String) -> Bool {
+        // Skip cache validation if caching is disabled
+        if !cachingEnabled {
+            return false
+        }
+
         // First check if manifest exists and matches
         guard let cachedManifest = loadCachedManifest(manifestId: manifestId),
             cachedManifest.layers == manifest.layers
@@ -335,6 +372,11 @@ class ImageContainerRegistry: @unchecked Sendable {
     }
 
     private func saveManifest(_ manifest: Manifest, manifestId: String) throws {
+        // Skip saving manifest if caching is disabled
+        if !cachingEnabled {
+            return
+        }
+
         let manifestPath = getCachedManifestPath(manifestId: manifestId)
         try JSONEncoder().encode(manifest).write(to: manifestPath)
     }
@@ -369,6 +411,11 @@ class ImageContainerRegistry: @unchecked Sendable {
     }
 
     private func saveImageMetadata(image: String, manifestId: String) throws {
+        // Skip saving metadata if caching is disabled
+        if !cachingEnabled {
+            return
+        }
+
         let metadataPath = getImageCacheDirectory(manifestId: manifestId).appendingPathComponent(
             "metadata.json")
         let metadata = ImageMetadata(
@@ -380,6 +427,11 @@ class ImageContainerRegistry: @unchecked Sendable {
     }
 
     private func cleanupOldVersions(currentManifestId: String, image: String) throws {
+        // Skip cleanup if caching is disabled
+        if !cachingEnabled {
+            return
+        }
+
         Logger.info(
             "Checking for old versions of image to clean up",
             metadata: [
@@ -417,6 +469,17 @@ class ImageContainerRegistry: @unchecked Sendable {
         }
     }
 
+    private func optimizeNetworkSettings() {
+        // Set global URLSession configuration properties for better performance
+        URLSessionConfiguration.default.httpMaximumConnectionsPerHost = 10
+        URLSessionConfiguration.default.httpShouldUsePipelining = true
+        URLSessionConfiguration.default.timeoutIntervalForResource = 3600
+
+        // Pre-warm DNS resolution
+        let preWarmTask = URLSession.shared.dataTask(with: URL(string: "https://\(self.registry)")!)
+        preWarmTask.resume()
+    }
+
     public func pull(
         image: String,
         name: String?,
@@ -430,7 +493,10 @@ class ImageContainerRegistry: @unchecked Sendable {
 
         // Use provided name or derive from image
         let vmName = name ?? image.split(separator: ":").first.map(String.init) ?? ""
-        let vmDir = try home.getVMDirectory(vmName, locationName: locationName)
+        let vmDir = try home.getVMDirectory(vmName, storage: locationName)
+
+        // Optimize network early in the process
+        optimizeNetworkSettings()
 
         // Parse image name and tag
         let components = image.split(separator: ":")
@@ -481,26 +547,34 @@ class ImageContainerRegistry: @unchecked Sendable {
             try? FileManager.default.removeItem(at: tempVMDir)
         }
 
-        // Check if we have a valid cached version and noCache is false
-        Logger.info("Checking cache for manifest ID: \(manifestId)")
-        if validateCache(manifest: manifest, manifestId: manifestId) {
+        // Check if caching is enabled and if we have a valid cached version
+        Logger.info("Caching enabled: \(cachingEnabled)")
+        if cachingEnabled && validateCache(manifest: manifest, manifestId: manifestId) {
             Logger.info("Using cached version of image")
             try await copyFromCache(manifest: manifest, manifestId: manifestId, to: tempVMDir)
         } else {
-            // Clean up old versions of this repository before setting up new cache
-            try cleanupOldVersions(currentManifestId: manifestId, image: imageName)
+            // If caching is disabled, log it
+            if !cachingEnabled {
+                Logger.info("Caching is disabled, downloading fresh copy")
+            } else {
+                Logger.info("Cache miss or invalid cache, setting up new cache")
+            }
 
-            Logger.info("Cache miss or invalid cache, setting up new cache")
-            // Setup new cache directory
-            try setupImageCache(manifestId: manifestId)
-            // Save new manifest
-            try saveManifest(manifest, manifestId: manifestId)
+            // Clean up old versions of this repository before setting up new cache if caching is enabled
+            if cachingEnabled {
+                try cleanupOldVersions(currentManifestId: manifestId, image: imageName)
 
-            // Save image metadata
-            try saveImageMetadata(
-                image: imageName,
-                manifestId: manifestId
-            )
+                // Setup new cache directory
+                try setupImageCache(manifestId: manifestId)
+                // Save new manifest
+                try saveManifest(manifest, manifestId: manifestId)
+
+                // Save image metadata
+                try saveImageMetadata(
+                    image: imageName,
+                    manifestId: manifestId
+                )
+            }
 
             // Create temporary directory for new downloads
             let tempDownloadDir = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -516,9 +590,6 @@ class ImageContainerRegistry: @unchecked Sendable {
                 $0.mediaType != "application/vnd.oci.empty.v1+json"
             }.count
             let totalSize = manifest.layers.reduce(0) { $0 + Int64($1.size) }
-            Logger.info(
-                "Total download size: \(ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file))"
-            )
             await progress.setTotal(totalSize, files: totalFiles)
 
             // Process layers with limited concurrency
@@ -526,6 +597,12 @@ class ImageContainerRegistry: @unchecked Sendable {
             Logger.info(
                 "This may take several minutes depending on the image size and your internet connection. Please wait..."
             )
+
+            // Add immediate progress indicator before starting downloads
+            print(
+                "[░░░░░░░░░░░░░░░░░░░░] 0% | Initializing downloads... | ETA: calculating...     ")
+            fflush(stdout)
+
             var diskParts: [(Int, URL)] = []
             var totalParts = 0
 
@@ -569,7 +646,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                             diskParts.append((partNum, cachedLayer))
 
                             // Still need to account for progress
-                            group.addTask { @Sendable [self] in
+                            group.addTask { [self] in
                                 await counter.increment()
                                 await progress.addProgress(Int64(size))
                                 await counter.decrement()
@@ -581,7 +658,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                                 "disk.img.part.\(partNum)")
                             diskParts.append((partNum, partURL))
 
-                            group.addTask { @Sendable [self] in
+                            group.addTask { [self] in
                                 await counter.increment()
 
                                 if FileManager.default.fileExists(atPath: cachedLayer.path) {
@@ -611,15 +688,19 @@ class ImageContainerRegistry: @unchecked Sendable {
                                         token: token,
                                         to: partURL,
                                         maxRetries: 5,
-                                        progress: progress
+                                        progress: progress,
+                                        manifestId: manifestId
                                     )
 
-                                    // Cache the downloaded layer if not in noCache mode
-                                    if FileManager.default.fileExists(atPath: cachedLayer.path) {
-                                        try FileManager.default.removeItem(at: cachedLayer)
+                                    // Cache the downloaded layer if caching is enabled
+                                    if cachingEnabled {
+                                        if FileManager.default.fileExists(atPath: cachedLayer.path)
+                                        {
+                                            try FileManager.default.removeItem(at: cachedLayer)
+                                        }
+                                        try FileManager.default.copyItem(
+                                            at: partURL, to: cachedLayer)
                                     }
-                                    try FileManager.default.copyItem(
-                                        at: partURL, to: cachedLayer)
                                     markDownloadComplete(digest)
                                 }
 
@@ -645,7 +726,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                             continue
                         }
 
-                        group.addTask { @Sendable [self] in
+                        group.addTask { [self] in
                             await counter.increment()
 
                             let cachedLayer = getCachedLayerPath(
@@ -677,14 +758,17 @@ class ImageContainerRegistry: @unchecked Sendable {
                                     token: token,
                                     to: outputURL,
                                     maxRetries: 5,
-                                    progress: progress
+                                    progress: progress,
+                                    manifestId: manifestId
                                 )
 
-                                // Cache the downloaded layer if not in noCache mode
-                                if FileManager.default.fileExists(atPath: cachedLayer.path) {
-                                    try FileManager.default.removeItem(at: cachedLayer)
+                                // Cache the downloaded layer if caching is enabled
+                                if cachingEnabled {
+                                    if FileManager.default.fileExists(atPath: cachedLayer.path) {
+                                        try FileManager.default.removeItem(at: cachedLayer)
+                                    }
+                                    try FileManager.default.copyItem(at: outputURL, to: cachedLayer)
                                 }
-                                try FileManager.default.copyItem(at: outputURL, to: cachedLayer)
                                 markDownloadComplete(digest)
                             }
 
@@ -721,7 +805,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                     { $0 + $1.size }
                 )
                 Logger.info(
-                    "Expected final size: \(ByteCountFormatter.string(fromByteCount: Int64(expectedTotalSize), countStyle: .file))"
+                    "Expected download size: \(ByteCountFormatter.string(fromByteCount: Int64(expectedTotalSize), countStyle: .file)) (actual disk usage will be significantly lower)"
                 )
 
                 // Create sparse file of the required size
@@ -819,12 +903,14 @@ class ImageContainerRegistry: @unchecked Sendable {
                     (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size]
                         as? UInt64) ?? 0
                 Logger.info(
-                    "Final disk image size: \(ByteCountFormatter.string(fromByteCount: Int64(finalSize), countStyle: .file))"
+                    "Final disk image size (before sparse file optimization): \(ByteCountFormatter.string(fromByteCount: Int64(finalSize), countStyle: .file))"
                 )
+                Logger.info(
+                    "Note: Actual disk usage will be much lower due to macOS sparse file system")
 
                 if finalSize != expectedTotalSize {
                     Logger.info(
-                        "Warning: Final size (\(finalSize) bytes) differs from expected size (\(expectedTotalSize) bytes)"
+                        "Warning: Final reported size (\(finalSize) bytes) differs from expected size (\(expectedTotalSize) bytes), but this doesn't affect functionality"
                     )
                 }
 
@@ -874,6 +960,9 @@ class ImageContainerRegistry: @unchecked Sendable {
         try FileManager.default.moveItem(at: tempVMDir, to: URL(fileURLWithPath: vmDir.dir.path))
 
         Logger.info("Download complete: Files extracted to \(vmDir.dir.path)")
+        Logger.info(
+            "Note: Actual disk usage is significantly lower than reported size due to macOS sparse file system"
+        )
         Logger.info(
             "Run 'lume run \(vmName)' to reduce the disk image file size by using macOS sparse file system"
         )
@@ -938,7 +1027,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                 return acc + fileSize
             }
             Logger.info(
-                "Expected final size from cache: \(ByteCountFormatter.string(fromByteCount: Int64(expectedTotalSize), countStyle: .file))"
+                "Expected download size from cache: \(ByteCountFormatter.string(fromByteCount: Int64(expectedTotalSize), countStyle: .file)) (actual disk usage will be lower)"
             )
 
             // Create sparse file of the required size
@@ -1028,12 +1117,12 @@ class ImageContainerRegistry: @unchecked Sendable {
                 (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? UInt64)
                 ?? 0
             Logger.info(
-                "Final disk image size from cache: \(ByteCountFormatter.string(fromByteCount: Int64(finalSize), countStyle: .file))"
+                "Final disk image size from cache (before sparse file optimization): \(ByteCountFormatter.string(fromByteCount: Int64(finalSize), countStyle: .file))"
             )
 
             if finalSize != expectedTotalSize {
                 Logger.info(
-                    "Warning: Final size (\(finalSize) bytes) differs from expected size (\(expectedTotalSize) bytes)"
+                    "Warning: Final reported size (\(finalSize) bytes) differs from expected size (\(expectedTotalSize) bytes), but this doesn't affect functionality"
                 )
             }
 
@@ -1086,9 +1175,32 @@ class ImageContainerRegistry: @unchecked Sendable {
         token: String,
         to url: URL,
         maxRetries: Int = 5,
-        progress: isolated ProgressTracker
+        progress: isolated ProgressTracker,
+        manifestId: String? = nil
     ) async throws {
         var lastError: Error?
+
+        // Create a shared session configuration for all download attempts
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 3600
+        config.waitsForConnectivity = true
+        config.httpMaximumConnectionsPerHost = 6
+        config.httpShouldUsePipelining = true
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+
+        // Enable HTTP/2 when available
+        if #available(macOS 13.0, *) {
+            config.httpAdditionalHeaders = ["Connection": "keep-alive"]
+        }
+
+        // Check for TCP window size and optimize if possible
+        if getTCPReceiveWindowSize() != nil {
+            config.networkServiceType = .responsiveData
+        }
+
+        // Create one session to be reused across retries
+        let session = URLSession(configuration: config)
 
         for attempt in 1...maxRetries {
             do {
@@ -1098,24 +1210,10 @@ class ImageContainerRegistry: @unchecked Sendable {
                 request.addValue(mediaType, forHTTPHeaderField: "Accept")
                 request.timeoutInterval = 60
 
-                // Optimized session configuration for speed
-                let config = URLSessionConfiguration.default
-                config.timeoutIntervalForRequest = 60
-                config.timeoutIntervalForResource = 3600
-                config.waitsForConnectivity = true
-
-                // Performance optimizations
-                config.httpMaximumConnectionsPerHost = 6
-                config.httpShouldUsePipelining = true
-                config.requestCachePolicy = .reloadIgnoringLocalCacheData
-
-                // Network service type optimization
-                if getTCPReceiveWindowSize() != nil {
-                    // If we can get TCP window size, the system supports advanced networking
-                    config.networkServiceType = .responsiveData
+                // Add Accept-Encoding for compressed transfer if content isn't already compressed
+                if !mediaType.contains("gzip") && !mediaType.contains("compressed") {
+                    request.addValue("gzip, deflate", forHTTPHeaderField: "Accept-Encoding")
                 }
-
-                let session = URLSession(configuration: config)
 
                 let (tempURL, response) = try await session.download(for: request)
                 guard let httpResponse = response as? HTTPURLResponse,
@@ -1128,6 +1226,18 @@ class ImageContainerRegistry: @unchecked Sendable {
                     at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try FileManager.default.moveItem(at: tempURL, to: url)
                 progress.addProgress(Int64(httpResponse.expectedContentLength))
+
+                // Cache the downloaded layer if caching is enabled
+                if cachingEnabled, let manifestId = manifestId {
+                    let cachedLayer = getCachedLayerPath(manifestId: manifestId, digest: digest)
+                    if FileManager.default.fileExists(atPath: cachedLayer.path) {
+                        try FileManager.default.removeItem(at: cachedLayer)
+                    }
+                    try FileManager.default.copyItem(at: url, to: cachedLayer)
+                }
+
+                // Mark download as complete regardless of caching
+                markDownloadComplete(digest)
                 return
 
             } catch {

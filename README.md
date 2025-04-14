@@ -53,6 +53,7 @@ Commands:
   lume delete <name>            Delete a VM
   lume pull <image>             Pull a macOS image from container registry
   lume clone <name> <new-name>  Clone an existing VM
+  lume config                   Get or set lume configuration
   lume images                   List available macOS images in local cache
   lume ipsw                     Get the latest macOS restore image URL
   lume prune                    Remove cached images
@@ -70,6 +71,7 @@ Command Options:
     --disk-size <size>   Disk size, e.g., 50GB (default: 40GB)
     --display <res>      Display resolution (default: 1024x768)
     --ipsw <path>        Path to IPSW file or 'latest' for macOS VMs
+    --storage <name>     VM storage location to use
 
   run:
     --no-display                Do not start the VNC client app
@@ -79,19 +81,48 @@ Command Options:
     --organization <org>        Organization to pull from (default: trycua)
     --vnc-port <port>           Port to use for the VNC server (default: 0 for auto-assign)
     --recovery-mode <boolean>   For MacOS VMs only, start VM in recovery mode (default: false)
+    --storage <name>            VM storage location to use
 
   set:
     --cpu <cores>        New number of CPU cores (e.g., 4)
     --memory <size>      New memory size (e.g., 8192MB or 8GB)
     --disk-size <size>   New disk size (e.g., 40960MB or 40GB)
     --display <res>      New display resolution in format WIDTHxHEIGHT (e.g., 1024x768)
+    --storage <name>     VM storage location to use
 
   delete:
     --force              Force deletion without confirmation
+    --storage <name>     VM storage location to use
 
   pull:
     --registry <url>     Container registry URL (default: ghcr.io)
     --organization <org> Organization to pull from (default: trycua)
+    --storage <name>     VM storage location to use
+
+  get:
+    -f, --format <format> Output format (json|text)
+    --storage <name>      VM storage location to use
+
+  stop:
+    --storage <name>     VM storage location to use
+
+  clone:
+    --source-storage <name> Source VM storage location
+    --dest-storage <name>   Destination VM storage location
+
+  config:
+    get                  Get current configuration
+    storage              Manage VM storage locations
+      add <name> <path>  Add a new VM storage location
+      remove <name>      Remove a VM storage location
+      list               List all VM storage locations
+      default <name>     Set the default VM storage location
+    cache                Manage cache settings
+      get                Get current cache directory
+      set <path>         Set cache directory
+    caching              Manage image caching settings
+      get                Show current caching status
+      set <boolean>      Enable or disable image caching
 
   serve:
     --port <port>        Port to listen on (default: 3000)

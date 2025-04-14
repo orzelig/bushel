@@ -16,10 +16,10 @@ extension Server {
         }
     }
 
-    func handleGetVM(name: String) async throws -> HTTPResponse {
+    func handleGetVM(name: String, storage: String? = nil) async throws -> HTTPResponse {
         do {
             let vmController = LumeController()
-            let vm = try vmController.get(name: name)
+            let vm = try vmController.get(name: name, storage: storage)
             return try .json(vm.details)
         } catch {
             return .badRequest(message: error.localizedDescription)
@@ -47,7 +47,8 @@ extension Server {
                 cpuCount: request.cpu,
                 memorySize: sizes.memory,
                 display: request.display,
-                ipsw: request.ipsw
+                ipsw: request.ipsw,
+                storage: request.storage
             )
 
             return HTTPResponse(
@@ -66,10 +67,10 @@ extension Server {
         }
     }
 
-    func handleDeleteVM(name: String) async throws -> HTTPResponse {
+    func handleDeleteVM(name: String, storage: String? = nil) async throws -> HTTPResponse {
         do {
             let vmController = LumeController()
-            try await vmController.delete(name: name)
+            try await vmController.delete(name: name, storage: storage)
             return HTTPResponse(
                 statusCode: .ok, headers: ["Content-Type": "application/json"], body: Data())
         } catch {
@@ -92,7 +93,12 @@ extension Server {
 
         do {
             let vmController = LumeController()
-            try vmController.clone(name: request.name, newName: request.newName)
+            try vmController.clone(
+                name: request.name,
+                newName: request.newName,
+                sourceLocation: request.sourceLocation,
+                destLocation: request.destLocation
+            )
 
             return HTTPResponse(
                 statusCode: .ok,
@@ -133,7 +139,8 @@ extension Server {
                 cpu: request.cpu,
                 memory: sizes.memory,
                 diskSize: sizes.diskSize,
-                display: sizes.display?.string
+                display: sizes.display?.string,
+                storage: request.storage
             )
 
             return HTTPResponse(
@@ -150,10 +157,10 @@ extension Server {
         }
     }
 
-    func handleStopVM(name: String) async throws -> HTTPResponse {
+    func handleStopVM(name: String, storage: String? = nil) async throws -> HTTPResponse {
         do {
             let vmController = LumeController()
-            try await vmController.stopVM(name: name)
+            try await vmController.stopVM(name: name, storage: storage)
             return HTTPResponse(
                 statusCode: .ok,
                 headers: ["Content-Type": "application/json"],
@@ -171,7 +178,7 @@ extension Server {
     func handleRunVM(name: String, body: Data?) async throws -> HTTPResponse {
         let request =
             body.flatMap { try? JSONDecoder().decode(RunVMRequest.self, from: $0) }
-            ?? RunVMRequest(noDisplay: nil, sharedDirectories: nil, recoveryMode: nil)
+            ?? RunVMRequest(noDisplay: nil, sharedDirectories: nil, recoveryMode: nil, storage: nil)
 
         do {
             let dirs = try request.parse()
@@ -181,7 +188,8 @@ extension Server {
                 name: name,
                 noDisplay: request.noDisplay ?? false,
                 sharedDirectories: dirs,
-                recoveryMode: request.recoveryMode ?? false
+                recoveryMode: request.recoveryMode ?? false,
+                storage: request.storage
             )
 
             // Return response immediately
@@ -240,12 +248,18 @@ extension Server {
                 image: request.image,
                 name: request.name,
                 registry: request.registry,
-                organization: request.organization
+                organization: request.organization,
+                storage: request.storage
             )
+
             return HTTPResponse(
                 statusCode: .ok,
                 headers: ["Content-Type": "application/json"],
-                body: try JSONEncoder().encode(["message": "Image pulled successfully"])
+                body: try JSONEncoder().encode([
+                    "message": "Image pulled successfully",
+                    "image": request.image,
+                    "name": request.name ?? "default",
+                ])
             )
         } catch {
             return HTTPResponse(
@@ -315,13 +329,156 @@ extension Server {
         }
     }
 
+    // MARK: - Config Management Handlers
+
+    func handleGetConfig() async throws -> HTTPResponse {
+        do {
+            let vmController = LumeController()
+            let settings = vmController.getSettings()
+            return try .json(settings)
+        } catch {
+            return .badRequest(message: error.localizedDescription)
+        }
+    }
+
+    struct ConfigRequest: Codable {
+        let homeDirectory: String?
+        let cacheDirectory: String?
+        let cachingEnabled: Bool?
+    }
+
+    func handleUpdateConfig(_ body: Data?) async throws -> HTTPResponse {
+        guard let body = body,
+            let request = try? JSONDecoder().decode(ConfigRequest.self, from: body)
+        else {
+            return HTTPResponse(
+                statusCode: .badRequest,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONEncoder().encode(APIError(message: "Invalid request body"))
+            )
+        }
+
+        do {
+            let vmController = LumeController()
+
+            if let homeDir = request.homeDirectory {
+                try vmController.setHomeDirectory(homeDir)
+            }
+
+            if let cacheDir = request.cacheDirectory {
+                try vmController.setCacheDirectory(path: cacheDir)
+            }
+
+            if let cachingEnabled = request.cachingEnabled {
+                try vmController.setCachingEnabled(cachingEnabled)
+            }
+
+            return HTTPResponse(
+                statusCode: .ok,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONEncoder().encode(["message": "Configuration updated successfully"])
+            )
+        } catch {
+            return HTTPResponse(
+                statusCode: .badRequest,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONEncoder().encode(APIError(message: error.localizedDescription))
+            )
+        }
+    }
+
+    func handleGetLocations() async throws -> HTTPResponse {
+        do {
+            let vmController = LumeController()
+            let locations = vmController.getLocations()
+            return try .json(locations)
+        } catch {
+            return .badRequest(message: error.localizedDescription)
+        }
+    }
+
+    struct LocationRequest: Codable {
+        let name: String
+        let path: String
+    }
+
+    func handleAddLocation(_ body: Data?) async throws -> HTTPResponse {
+        guard let body = body,
+            let request = try? JSONDecoder().decode(LocationRequest.self, from: body)
+        else {
+            return HTTPResponse(
+                statusCode: .badRequest,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONEncoder().encode(APIError(message: "Invalid request body"))
+            )
+        }
+
+        do {
+            let vmController = LumeController()
+            try vmController.addLocation(name: request.name, path: request.path)
+
+            return HTTPResponse(
+                statusCode: .ok,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONEncoder().encode([
+                    "message": "Location added successfully",
+                    "name": request.name,
+                    "path": request.path,
+                ])
+            )
+        } catch {
+            return HTTPResponse(
+                statusCode: .badRequest,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONEncoder().encode(APIError(message: error.localizedDescription))
+            )
+        }
+    }
+
+    func handleRemoveLocation(_ name: String) async throws -> HTTPResponse {
+        do {
+            let vmController = LumeController()
+            try vmController.removeLocation(name: name)
+            return HTTPResponse(
+                statusCode: .ok,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONEncoder().encode(["message": "Location removed successfully"])
+            )
+        } catch {
+            return HTTPResponse(
+                statusCode: .badRequest,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONEncoder().encode(APIError(message: error.localizedDescription))
+            )
+        }
+    }
+
+    func handleSetDefaultLocation(_ name: String) async throws -> HTTPResponse {
+        do {
+            let vmController = LumeController()
+            try vmController.setDefaultLocation(name: name)
+            return HTTPResponse(
+                statusCode: .ok,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONEncoder().encode(["message": "Default location set successfully"])
+            )
+        } catch {
+            return HTTPResponse(
+                statusCode: .badRequest,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONEncoder().encode(APIError(message: error.localizedDescription))
+            )
+        }
+    }
+
     // MARK: - Private Helper Methods
 
     nonisolated private func startVM(
         name: String,
         noDisplay: Bool,
         sharedDirectories: [SharedDirectory] = [],
-        recoveryMode: Bool = false
+        recoveryMode: Bool = false,
+        storage: String? = nil
     ) {
         Task.detached { @MainActor @Sendable in
             Logger.info("Starting VM in background", metadata: ["name": name])
@@ -331,7 +488,8 @@ extension Server {
                     name: name,
                     noDisplay: noDisplay,
                     sharedDirectories: sharedDirectories,
-                    recoveryMode: recoveryMode
+                    recoveryMode: recoveryMode,
+                    storage: storage
                 )
                 Logger.info("VM started successfully in background", metadata: ["name": name])
             } catch {
