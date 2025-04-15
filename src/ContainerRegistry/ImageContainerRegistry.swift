@@ -809,94 +809,118 @@ class ImageContainerRegistry: @unchecked Sendable {
                 )
 
                 // Create sparse file of the required size
-                FileManager.default.createFile(atPath: outputURL.path, contents: nil)
                 let outputHandle = try FileHandle(forWritingTo: outputURL)
+                defer { try? outputHandle.close() }
 
                 // Set the file size without writing data (creates a sparse file)
                 try outputHandle.truncate(atOffset: expectedTotalSize)
 
                 var reassemblyProgressLogger = ProgressLogger(threshold: 0.05)
-                var processedSize: UInt64 = 0
+                var currentOffset: UInt64 = 0  // Track position in the final *decompressed* file
 
-                // Process each part in order
                 for partNum in 1...totalParts {
-                    guard let (_, partURL) = diskParts.first(where: { $0.0 == partNum }) else {
+                    // Find the original layer info for this part number
+                    guard
+                        let layer = manifest.layers.first(where: { layer in
+                            if let info = extractPartInfo(from: layer.mediaType) {
+                                return info.partNum == partNum
+                            }
+                            return false
+                        }),
+                        let (_, partURL) = diskParts.first(where: { $0.0 == partNum })
+                    else {
                         throw PullError.missingPart(partNum)
                     }
+                    let layerMediaType = layer.mediaType  // Extract mediaType here
 
                     Logger.info(
                         "Processing part \(partNum) of \(totalParts): \(partURL.lastPathComponent)")
 
-                    // Get part file size
-                    let partAttributes = try FileManager.default.attributesOfItem(
-                        atPath: partURL.path)
-                    let partSize = partAttributes[.size] as? UInt64 ?? 0
-
-                    // Calculate the offset in the final file (parts are sequential)
-                    let partOffset = processedSize
-
-                    // Open input file
                     let inputHandle = try FileHandle(forReadingFrom: partURL)
                     defer {
                         try? inputHandle.close()
-                        // Don't delete the part file if it's from cache
+                        // Clean up temp downloaded part if not from cache
                         if !partURL.path.contains(cacheDirectory.path) {
                             try? FileManager.default.removeItem(at: partURL)
                         }
                     }
 
-                    // Seek to the appropriate offset in output file
-                    try outputHandle.seek(toOffset: partOffset)
+                    // Seek to the correct offset in the output sparse file
+                    try outputHandle.seek(toOffset: currentOffset)
 
-                    // Copy data in chunks to avoid memory issues
-                    let chunkSize: UInt64 =
-                        determineIfMemoryConstrained() ? 256 * 1024 : 1024 * 1024  // Use smaller chunks (256KB-1MB)
-                    var bytesWritten: UInt64 = 0
+                    if let decompressCmd = getDecompressionCommand(for: layerMediaType) {  // Use extracted mediaType
+                        Logger.info("Decompressing part \(partNum)...")
+                        let process = Process()
+                        let pipe = Pipe()
+                        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+                        process.arguments = ["-c", "\(decompressCmd) < \"\(partURL.path)\""]  // Feed file via stdin redirection
+                        process.standardOutput = pipe  // Capture decompressed output
 
-                    while bytesWritten < partSize {
-                        // Use Foundation's autoreleasepool for proper memory management
-                        Foundation.autoreleasepool {
-                            let readSize: UInt64 = min(UInt64(chunkSize), partSize - bytesWritten)
-                            if let chunk = try? inputHandle.read(upToCount: Int(readSize)) {
-                                if !chunk.isEmpty {
-                                    try? outputHandle.write(contentsOf: chunk)
-                                    bytesWritten += UInt64(chunk.count)
+                        try process.run()
 
-                                    // Update progress less frequently to reduce overhead
-                                    if bytesWritten % (chunkSize * 4) == 0
-                                        || bytesWritten == partSize
-                                    {
-                                        let totalProgress =
-                                            Double(processedSize + bytesWritten)
-                                            / Double(expectedTotalSize)
-                                        reassemblyProgressLogger.logProgress(
-                                            current: totalProgress,
-                                            context: "Reassembling disk image")
-                                    }
-                                }
+                        let reader = pipe.fileHandleForReading
+                        var partDecompressedSize: UInt64 = 0
+
+                        // Read decompressed data in chunks and write to sparse file
+                        while true {
+                            let data = autoreleasepool {  // Help manage memory with large files
+                                reader.readData(ofLength: 1024 * 1024)  // Read 1MB chunks
                             }
+                            if data.isEmpty { break }  // End of stream
 
-                            // Add a small delay every few MB to allow memory cleanup
-                            if bytesWritten % (chunkSize * 16) == 0 && bytesWritten > 0 {
-                                // Use Thread.sleep for now, but ideally this would use a non-blocking approach
-                                // that is appropriate for the context (sync/async)
-                                Thread.sleep(forTimeInterval: 0.01)
-                            }
+                            try outputHandle.write(contentsOf: data)
+                            partDecompressedSize += UInt64(data.count)
+
+                            // Update progress based on decompressed size written
+                            let totalProgress =
+                                Double(currentOffset + partDecompressedSize)
+                                / Double(expectedTotalSize)
+                            reassemblyProgressLogger.logProgress(
+                                current: totalProgress,
+                                context: "Reassembling/Decompressing")
                         }
+                        process.waitUntilExit()
+                        if process.terminationStatus != 0 {
+                            throw PullError.decompressionFailed("Part \(partNum)")
+                        }
+                        currentOffset += partDecompressedSize  // Advance offset by decompressed size
+
+                    } else {
+                        // --- Handle non-compressed parts (if any, or the single file case) ---
+                        // This part is similar to your original copy logic, writing directly
+                        // from inputHandle to outputHandle at currentOffset
+                        Logger.info("Copying non-compressed part \(partNum)...")
+                        let partSize =
+                            (try? FileManager.default.attributesOfItem(atPath: partURL.path)[.size]
+                                as? UInt64) ?? 0
+                        var bytesWritten: UInt64 = 0
+                        let chunkSize = 1024 * 1024
+                        while bytesWritten < partSize {
+                            let data = autoreleasepool {
+                                try! inputHandle.read(upToCount: chunkSize) ?? Data()
+                            }
+                            if data.isEmpty { break }
+                            try outputHandle.write(contentsOf: data)
+                            bytesWritten += UInt64(data.count)
+
+                            // Update progress
+                            let totalProgress =
+                                Double(currentOffset + bytesWritten) / Double(expectedTotalSize)
+                            reassemblyProgressLogger.logProgress(
+                                current: totalProgress,
+                                context: "Reassembling")
+                        }
+                        currentOffset += bytesWritten
+                        // --- End non-compressed handling ---
                     }
 
-                    // Update processed size
-                    processedSize += partSize
+                    // Ensure data is written before processing next part (optional but safer)
+                    try outputHandle.synchronize()
                 }
 
-                // Finalize progress
-                reassemblyProgressLogger.logProgress(
-                    current: 1.0, context: "Reassembling disk image")
-                Logger.info("")  // Newline after progress
-
-                // Close the output file
-                try outputHandle.synchronize()
-                try outputHandle.close()
+                // Finalize progress, close handle (done by defer)
+                reassemblyProgressLogger.logProgress(current: 1.0, context: "Reassembly Complete")
+                Logger.info("")  // Newline
 
                 // Verify final size
                 let finalSize =
@@ -1031,86 +1055,112 @@ class ImageContainerRegistry: @unchecked Sendable {
             )
 
             // Create sparse file of the required size
-            FileManager.default.createFile(atPath: outputURL.path, contents: nil)
             let outputHandle = try FileHandle(forWritingTo: outputURL)
+            defer { try? outputHandle.close() }
 
             // Set the file size without writing data (creates a sparse file)
             try outputHandle.truncate(atOffset: expectedTotalSize)
 
             var reassemblyProgressLogger = ProgressLogger(threshold: 0.05)
-            var processedSize: UInt64 = 0
+            var currentOffset: UInt64 = 0  // Track position in the final *decompressed* file
 
-            // Process each part in order
             for partNum in 1...totalParts {
-                guard let (_, sourceURL) = diskPartSources.first(where: { $0.0 == partNum }) else {
+                // Find the original layer info for this part number
+                guard
+                    let layer = manifest.layers.first(where: { layer in
+                        if let info = extractPartInfo(from: layer.mediaType) {
+                            return info.partNum == partNum
+                        }
+                        return false
+                    }),
+                    let (_, sourceURL) = diskPartSources.first(where: { $0.0 == partNum })
+                else {
                     throw PullError.missingPart(partNum)
                 }
+                let layerMediaType = layer.mediaType  // Extract mediaType here
 
                 Logger.info(
                     "Processing part \(partNum) of \(totalParts) from cache: \(sourceURL.lastPathComponent)"
                 )
 
-                // Get part file size
-                let partAttributes = try FileManager.default.attributesOfItem(
-                    atPath: sourceURL.path)
-                let partSize = partAttributes[.size] as? UInt64 ?? 0
-
-                // Calculate the offset in the final file (parts are sequential)
-                let partOffset = processedSize
-
-                // Open input file
                 let inputHandle = try FileHandle(forReadingFrom: sourceURL)
                 defer { try? inputHandle.close() }
 
-                // Seek to the appropriate offset in output file
-                try outputHandle.seek(toOffset: partOffset)
+                // Seek to the correct offset in the output sparse file
+                try outputHandle.seek(toOffset: currentOffset)
 
-                // Copy data in chunks to avoid memory issues
-                let chunkSize: UInt64 = determineIfMemoryConstrained() ? 256 * 1024 : 1024 * 1024  // Use smaller chunks (256KB-1MB)
-                var bytesWritten: UInt64 = 0
+                if let decompressCmd = getDecompressionCommand(for: layerMediaType) {  // Use extracted mediaType
+                    Logger.info("Decompressing part \(partNum)...")
+                    let process = Process()
+                    let pipe = Pipe()
+                    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+                    process.arguments = ["-c", "\(decompressCmd) < \"\(sourceURL.path)\""]  // Feed file via stdin redirection
+                    process.standardOutput = pipe  // Capture decompressed output
 
-                while bytesWritten < partSize {
-                    // Use Foundation's autoreleasepool for proper memory management
-                    Foundation.autoreleasepool {
-                        let readSize: UInt64 = min(UInt64(chunkSize), partSize - bytesWritten)
-                        if let chunk = try? inputHandle.read(upToCount: Int(readSize)) {
-                            if !chunk.isEmpty {
-                                try? outputHandle.write(contentsOf: chunk)
-                                bytesWritten += UInt64(chunk.count)
+                    try process.run()
 
-                                // Update progress less frequently to reduce overhead
-                                if bytesWritten % (chunkSize * 4) == 0 || bytesWritten == partSize {
-                                    let totalProgress =
-                                        Double(processedSize + bytesWritten)
-                                        / Double(expectedTotalSize)
-                                    reassemblyProgressLogger.logProgress(
-                                        current: totalProgress,
-                                        context: "Reassembling disk image from cache")
-                                }
-                            }
+                    let reader = pipe.fileHandleForReading
+                    var partDecompressedSize: UInt64 = 0
+
+                    // Read decompressed data in chunks and write to sparse file
+                    while true {
+                        let data = autoreleasepool {  // Help manage memory with large files
+                            reader.readData(ofLength: 1024 * 1024)  // Read 1MB chunks
                         }
+                        if data.isEmpty { break }  // End of stream
 
-                        // Add a small delay every few MB to allow memory cleanup
-                        if bytesWritten % (chunkSize * 16) == 0 && bytesWritten > 0 {
-                            // Use Thread.sleep for now, but ideally this would use a non-blocking approach
-                            // that is appropriate for the context (sync/async)
-                            Thread.sleep(forTimeInterval: 0.01)
-                        }
+                        try outputHandle.write(contentsOf: data)
+                        partDecompressedSize += UInt64(data.count)
+
+                        // Update progress based on decompressed size written
+                        let totalProgress =
+                            Double(currentOffset + partDecompressedSize) / Double(expectedTotalSize)
+                        reassemblyProgressLogger.logProgress(
+                            current: totalProgress,
+                            context: "Reassembling")
                     }
+                    process.waitUntilExit()
+                    if process.terminationStatus != 0 {
+                        throw PullError.decompressionFailed("Part \(partNum)")
+                    }
+                    currentOffset += partDecompressedSize  // Advance offset by decompressed size
+
+                } else {
+                    // --- Handle non-compressed parts (if any, or the single file case) ---
+                    // This part is similar to your original copy logic, writing directly
+                    // from inputHandle to outputHandle at currentOffset
+                    Logger.info("Copying non-compressed part \(partNum)...")
+                    let partSize =
+                        (try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size]
+                            as? UInt64) ?? 0
+                    var bytesWritten: UInt64 = 0
+                    let chunkSize = 1024 * 1024
+                    while bytesWritten < partSize {
+                        let data = autoreleasepool {
+                            try! inputHandle.read(upToCount: chunkSize) ?? Data()
+                        }
+                        if data.isEmpty { break }
+                        try outputHandle.write(contentsOf: data)
+                        bytesWritten += UInt64(data.count)
+
+                        // Update progress
+                        let totalProgress =
+                            Double(currentOffset + bytesWritten) / Double(expectedTotalSize)
+                        reassemblyProgressLogger.logProgress(
+                            current: totalProgress,
+                            context: "Reassembling")
+                    }
+                    currentOffset += bytesWritten
+                    // --- End non-compressed handling ---
                 }
 
-                // Update processed size
-                processedSize += partSize
+                // Ensure data is written before processing next part (optional but safer)
+                try outputHandle.synchronize()
             }
 
-            // Finalize progress
-            reassemblyProgressLogger.logProgress(
-                current: 1.0, context: "Reassembling disk image from cache")
-            Logger.info("")  // Newline after progress
-
-            // Close the output file
-            try outputHandle.synchronize()
-            try outputHandle.close()
+            // Finalize progress, close handle (done by defer)
+            reassemblyProgressLogger.logProgress(current: 1.0, context: "Reassembly Complete")
+            Logger.info("")  // Newline
 
             // Verify final size
             let finalSize =
@@ -1644,6 +1694,36 @@ class ImageContainerRegistry: @unchecked Sendable {
             // Ignore errors, we'll use defaults
         }
 
+        return nil
+    }
+
+    // Add helper to check media type and get decompress command
+    private func getDecompressionCommand(for mediaType: String) -> String? {
+        if mediaType.hasSuffix("+gzip") {
+            return "/usr/bin/gunzip -c"  // -c writes to stdout
+        } else if mediaType.hasSuffix("+zstd") {
+            // Check if zstd exists, otherwise handle error?
+            // Assuming brew install zstd -> /opt/homebrew/bin/zstd or /usr/local/bin/zstd
+            let zstdPath = findExecutablePath(named: "zstd") ?? "/usr/local/bin/zstd"
+            return "\(zstdPath) -dc"  // -d decompress, -c stdout
+        }
+        return nil  // Not compressed or unknown compression
+    }
+
+    // Helper to find executables (optional, or hardcode paths)
+    private func findExecutablePath(named executableName: String) -> String? {
+        let pathEnv =
+            ProcessInfo.processInfo.environment["PATH"]
+            ?? "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
+        let paths = pathEnv.split(separator: ":")
+        for path in paths {
+            let executablePath = URL(fileURLWithPath: String(path)).appendingPathComponent(
+                executableName
+            ).path
+            if FileManager.default.isExecutableFile(atPath: executablePath) {
+                return executablePath
+            }
+        }
         return nil
     }
 }

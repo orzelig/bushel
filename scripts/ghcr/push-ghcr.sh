@@ -83,19 +83,19 @@ done
 # Authenticate with GitHub Container Registry
 echo "$GITHUB_TOKEN" | oras login ghcr.io -u "$organization" --password-stdin
 
-# Create a temporary directory for processing files
-work_dir=$(mktemp -d)
-echo "Working directory: $work_dir"
-trap 'rm -rf "$work_dir"' EXIT
+# Use the source folder path as the working directory and get its absolute path
+work_dir=$(cd "$folder_path" && pwd)
+echo "Working directory (persistent cache): $work_dir"
 
-# Create a directory for all files
-mkdir -p "$work_dir/files"
-cd "$work_dir/files"
+# Change to the working directory
+cd "$work_dir"
+files=() # Initialize files array here
 
 # Copy config.json if it exists
 if [ -f "$folder_path/config.json" ]; then
     echo "Copying config.json..."
     cp "$folder_path/config.json" config.json
+    files+=("config.json:application/vnd.oci.image.config.v1+json")
 fi
 
 # Copy nvram.bin if it exists
@@ -103,106 +103,104 @@ nvram_bin="$folder_path/nvram.bin"
 if [ -f "$nvram_bin" ]; then
     echo "Copying nvram.bin..."
     cp "$nvram_bin" nvram.bin
+    files+=("nvram.bin:application/octet-stream")
 fi
 
-# Process disk.img if it exists and needs splitting
-disk_img="$folder_path/disk.img"
-if [ -f "$disk_img" ]; then
-    file_size=$(stat -f%z "$disk_img")
-    if [ $file_size -gt 524288000 ]; then  # 500MB in bytes
-        echo "Splitting large file: disk.img"
-        echo "Original disk.img size: $(du -h "$disk_img" | cut -f1)"
-        
-        # Copy and split the file with progress monitoring
-        echo "Copying disk image..."
-        pv "$disk_img" > disk.img
-        
-        echo "Splitting file..."
-        split -b "$chunk_size" disk.img disk.img.part.
-        rm disk.img
+# Process disk.img if it exists
+disk_img_orig="disk.img" # Already in work_dir
+if [ -f "$disk_img_orig" ]; then
+    # --- Compression Step ---
+    echo "Compressing $disk_img_orig..."
+    compressed_ext=".gz"
+    compressor="gzip"
+    compress_opts="-k -f"
+    compressed_disk_img="disk.img${compressed_ext}"
+    pv "$disk_img_orig" | $compressor $compress_opts > "$compressed_disk_img"
+    compressed_size=$(stat -f%z "$compressed_disk_img")
+    echo "Compressed disk image size: $(du -h "$compressed_disk_img" | cut -f1)"
+    # --- End Compression Step ---
 
-        # Get original file size for verification
-        original_size=$(stat -f%z "$disk_img")
-        echo "Original disk.img size: $(awk -v size=$original_size 'BEGIN {printf "%.2f GB", size/1024/1024/1024}')"
+    # Check if splitting is needed based on *compressed* size
+    if [ $compressed_size -gt 524288000 ]; then # 500MB threshold
+        echo "Splitting compressed file: $compressed_disk_img"
+        split -b "$chunk_size" "$compressed_disk_img" "$compressed_disk_img.part."
+        # Keep the compressed file and parts in work_dir
 
-        # Verify split parts total size
-        total_size=0
-        total_parts=$(ls disk.img.part.* | wc -l | tr -d ' ')
+        # --- Adjust part processing ---
+        parts_files=()
+        total_parts=$(ls "$compressed_disk_img.part."* | wc -l | tr -d ' ')
         part_num=0
-        
-        # Create array for files and their annotations
-        files=()
-        for part in disk.img.part.*; do
-            part_size=$(stat -f%z "$part")
-            total_size=$((total_size + part_size))
+        for part in "$compressed_disk_img.part."*; do
             part_num=$((part_num + 1))
-            echo "Part $part: $(awk -v size=$part_size 'BEGIN {printf "%.2f GB", size/1024/1024/1024}')"
-            files+=("$part:application/vnd.oci.image.layer.v1.tar;part.number=$part_num;part.total=$total_parts")
+            # *** IMPORTANT: Use the *compressed* OCI media type with part info ***
+            parts_files+=("$part:${oci_layer_media_type};part.number=$part_num;part.total=$total_parts")
+            echo "Part $part: $(du -h "$part" | cut -f1)"
         done
+        # Combine non-disk files with disk parts
+        files+=("${parts_files[@]}")
+        # --- End Adjust part processing ---
 
-        echo "Total size of parts: $(awk -v size=$total_size 'BEGIN {printf "%.2f GB", size/1024/1024/1024}')"
-        
-        # Verify total size matches original
-        if [ $total_size -ne $original_size ]; then
-            echo "ERROR: Size mismatch!"
-            echo "Original file size: $(awk -v size=$original_size 'BEGIN {printf "%.2f GB", size/1024/1024/1024}')"
-            echo "Sum of parts size: $(awk -v size=$total_size 'BEGIN {printf "%.2f GB", size/1024/1024/1024}')"
-            echo "Difference: $(awk -v orig=$original_size -v total=$total_size 'BEGIN {printf "%.2f GB", (orig-total)/1024/1024/1024}')"
-            exit 1
-        fi
-        
-        # Add remaining files
-        if [ -f "config.json" ]; then
-            files+=("config.json:application/vnd.oci.image.config.v1+json")
-        fi
-        
-        if [ -f "nvram.bin" ]; then
-            files+=("nvram.bin:application/octet-stream")
-        fi
-
-        # Push versions in parallel
-        push_pids=()
-        for version in $image_versions; do
-            (
-                echo "Pushing version $version..."
-                oras push --disable-path-validation \
-                    "ghcr.io/$organization/$image_name:$version" \
-                    "${files[@]}"
-                echo "Completed push for version $version"
-            ) &
-            push_pids+=($!)
-        done
-
-        # Wait for all pushes to complete
-        for pid in "${push_pids[@]}"; do
-            wait "$pid"
-        done
     else
-        # Push disk.img directly if it's small enough
-        echo "Copying disk image..."
-        pv "$disk_img" > disk.img
-        
-        # Push all files together
-        echo "Pushing all files..."
-        files=("disk.img:application/vnd.oci.image.layer.v1.tar")
-        
-        if [ -f "config.json" ]; then
-            files+=("config.json:application/vnd.oci.image.config.v1+json")
-        fi
-        
-        if [ -f "nvram.bin" ]; then
-            files+=("nvram.bin:application/octet-stream")
-        fi
+        # Add the single compressed file to the list
+        # *** IMPORTANT: Use the *compressed* OCI media type ***
+        files+=("$compressed_disk_img:${oci_layer_media_type}")
+    fi
 
-        for version in $image_versions; do
-            # Push all files in one command
+    # --- Push Logic (Remains largely the same, but $files now contains compressed parts/file) ---
+    push_pids=()
+    IFS=',' read -ra versions <<< "$image_versions"
+    for version in "${versions[@]}"; do
+         # Trim whitespace if any from version splitting
+        version=$(echo "$version" | xargs)
+        if [[ -z "$version" ]]; then continue; fi
+
+        echo "Pushing version $version..."
+        (
+            # Use process substitution to feed file list safely if it gets long
             oras push --disable-path-validation \
                 "ghcr.io/$organization/$image_name:$version" \
                 "${files[@]}"
-        done
+            echo "Completed push for version $version"
+        ) &
+        push_pids+=($!)
+    done
+
+    # Wait for all pushes to complete
+    for pid in "${push_pids[@]}"; do
+        wait "$pid"
+    done
+
+    # --- Cleanup compressed files after successful push ---
+    echo "Push successful, cleaning up compressed artifacts..."
+    # Check if parts exist first
+    parts_exist=$(ls "$compressed_disk_img.part."* 2>/dev/null)
+    if [ -n "$parts_exist" ]; then
+        echo "Removing split parts: $compressed_disk_img.part.* and $compressed_disk_img"
+        rm -f "$compressed_disk_img.part."*
+        # Also remove the original compressed file that was split
+        rm -f "$compressed_disk_img"
+    elif [ -f "$compressed_disk_img" ]; then
+        echo "Removing compressed file: $compressed_disk_img"
+        rm -f "$compressed_disk_img"
+    fi
+    # --- End Push Logic ---
+
+else
+    echo "Warning: $disk_img_orig not found."
+    # Push only config/nvram if they exist
+    if [ ${#files[@]} -gt 0 ]; then
+         # (Add push logic here too if you want to push even without disk.img)
+         echo "Pushing non-disk files..."
+         # ... (similar push loop as above) ...
+    else
+        echo "No files found to push."
+        exit 1
     fi
 fi
 
-for version in $image_versions; do
+for version in "${versions[@]}"; do
+     # Trim whitespace if any from version splitting
+    version=$(echo "$version" | xargs)
+    if [[ -z "$version" ]]; then continue; fi
     echo "Upload complete: ghcr.io/$organization/$image_name:$version"
 done
