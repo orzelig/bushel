@@ -52,6 +52,7 @@ Commands:
   lume stop <name>              Stop a running VM
   lume delete <name>            Delete a VM
   lume pull <image>             Pull a macOS image from container registry
+  lume push <name> <image:tag>  Push a VM image to a container registry
   lume clone <name> <new-name>  Clone an existing VM
   lume config                   Get or set lume configuration
   lume images                   List available macOS images in local cache
@@ -99,6 +100,16 @@ Command Options:
     --organization <org> Organization to pull from (default: trycua)
     --storage <name>     VM storage location to use
 
+  push:
+    --additional-tags <tags...>  Additional tags to push the same image to
+    --registry <url>            Container registry URL (default: ghcr.io)
+    --organization <org>        Organization/user to push to (default: trycua)
+    --storage <name>            VM storage location to use
+    --chunk-size-mb <size>      Chunk size for disk image upload in MB (default: 512)
+    --verbose                   Enable verbose logging
+    --dry-run                   Prepare files and show plan without uploading
+    --reassemble                Verify integrity by reassembling chunks (requires --dry-run)
+
   get:
     -f, --format <format> Output format (json|text)
     --storage <name>      VM storage location to use
@@ -141,18 +152,21 @@ You can also download the `lume.pkg.tar.gz` archive from the [latest release](ht
 ## Prebuilt Images
 
 Pre-built images are available in the registry [ghcr.io/trycua](https://github.com/orgs/trycua/packages). 
+
+**Important Note (v0.2.0+):** Images are being re-uploaded with sparse file system optimizations enabled, resulting in significantly lower actual disk usage. Older images (without the `-sparse` suffix) are now **deprecated**. The last version of `lume` fully supporting the non-sparse images was `v0.1.x`. Starting from `lume v0.2.0`, please use the images with the `-sparse` suffix.
+
 These images come with an SSH server pre-configured and auto-login enabled.
 
 For the security of your VM, change the default password `lume` immediately after your first login.
 
-| Image | Tag | Description | Size |
+| Image | Tag | Description | Logical Size |
 |-------|------------|-------------|------|
-| `macos-sequoia-vanilla` | `latest`, `15.2` | macOS Sequoia 15.2 image | 40GB |
-| `macos-sequoia-xcode` | `latest`, `15.2` | macOS Sequoia 15.2 image with Xcode command line tools | 50GB |
-| `macos-sequoia-cua` | `latest`, `15.3` | macOS Sequoia 15.3 image compatible with the Computer interface | 80GB |
-| `ubuntu-noble-vanilla` | `latest`, `24.04.1` | [Ubuntu Server for ARM 24.04.1 LTS](https://ubuntu.com/download/server/arm) with Ubuntu Desktop | 20GB |
+| `macos-sequoia-vanilla-sparse` | `latest`, `15.2` | macOS Sequoia 15.2 image | 40GB |
+| `macos-sequoia-xcode-sparse` | `latest`, `15.2` | macOS Sequoia 15.2 image with Xcode command line tools | 50GB |
+| `macos-sequoia-cua-sparse` | `latest`, `15.3` | macOS Sequoia 15.3 image compatible with the Computer interface | 80GB |
+| `ubuntu-noble-vanilla-sparse` | `latest`, `24.04.1` | [Ubuntu Server for ARM 24.04.1 LTS](https://ubuntu.com/download/server/arm) with Ubuntu Desktop | 20GB |
 
-For additional disk space, resize the VM disk after pulling the image using the `lume set <name> --disk-size <size>` command.
+For additional disk space, resize the VM disk after pulling the image using the `lume set <name> --disk-size <size>` command. Note that the actual disk space used by sparse images will be much lower than the logical size listed.
 
 ## Local API Server
   

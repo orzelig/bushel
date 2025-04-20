@@ -102,3 +102,31 @@ struct CloneRequest: Codable {
     let sourceLocation: String?
     let destLocation: String?
 }
+
+struct PushRequest: Codable {
+    let name: String // Name of the local VM
+    let imageName: String // Base name for the image in the registry
+    let tags: [String] // List of tags to push
+    var registry: String // Registry URL
+    var organization: String // Organization/user in the registry
+    let storage: String? // Optional VM storage location
+    var chunkSizeMb: Int // Chunk size
+    // dryRun and reassemble are less common for API, default to false?
+    // verbose is usually handled by server logging
+
+    enum CodingKeys: String, CodingKey {
+        case name, imageName, tags, registry, organization, storage, chunkSizeMb
+    }
+
+    // Provide default values for optional fields during decoding
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        imageName = try container.decode(String.self, forKey: .imageName)
+        tags = try container.decode([String].self, forKey: .tags)
+        registry = try container.decodeIfPresent(String.self, forKey: .registry) ?? "ghcr.io"
+        organization = try container.decodeIfPresent(String.self, forKey: .organization) ?? "trycua"
+        storage = try container.decodeIfPresent(String.self, forKey: .storage)
+        chunkSizeMb = try container.decodeIfPresent(Int.self, forKey: .chunkSizeMb) ?? 512
+    }
+}

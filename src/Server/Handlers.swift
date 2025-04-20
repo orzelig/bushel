@@ -288,6 +288,54 @@ extension Server {
         }
     }
 
+    func handlePush(_ body: Data?) async throws -> HTTPResponse {
+        guard let body = body,
+              let request = try? JSONDecoder().decode(PushRequest.self, from: body)
+        else {
+            return HTTPResponse(
+                statusCode: .badRequest,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONEncoder().encode(APIError(message: "Invalid request body"))
+            )
+        }
+
+        // Trigger push asynchronously, return Accepted immediately
+        Task.detached { @MainActor @Sendable in
+            do {
+                let vmController = LumeController()
+                try await vmController.pushImage(
+                    name: request.name,
+                    imageName: request.imageName,
+                    tags: request.tags,
+                    registry: request.registry,
+                    organization: request.organization,
+                    storage: request.storage,
+                    chunkSizeMb: request.chunkSizeMb,
+                    verbose: false, // Verbose typically handled by server logs
+                    dryRun: false, // Default API behavior is likely non-dry-run
+                    reassemble: false // Default API behavior is likely non-reassemble
+                )
+                Logger.info("Background push completed successfully for image: \(request.imageName):\(request.tags.joined(separator: ","))")
+            } catch {
+                Logger.error(
+                    "Background push failed for image: \(request.imageName):\(request.tags.joined(separator: ","))",
+                    metadata: ["error": error.localizedDescription]
+                )
+            }
+        }
+
+        return HTTPResponse(
+            statusCode: .accepted,
+            headers: ["Content-Type": "application/json"],
+            body: try JSONEncoder().encode([
+                "message": AnyEncodable("Push initiated in background"),
+                "name": AnyEncodable(request.name),
+                "imageName": AnyEncodable(request.imageName),
+                "tags": AnyEncodable(request.tags),
+            ])
+        )
+    }
+
     func handleGetImages(_ request: HTTPRequest) async throws -> HTTPResponse {
         let pathAndQuery = request.path.split(separator: "?", maxSplits: 1)
         let queryParams =

@@ -5,6 +5,7 @@ enum CommandRegistry {
         [
             Create.self,
             Pull.self,
+            Push.self,
             Images.self,
             Clone.self,
             Get.self,
