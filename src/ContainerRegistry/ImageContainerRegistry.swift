@@ -1098,7 +1098,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                     let layerMediaType = layer.mediaType 
                     */
                     // Assume the media type for decompression purposes
-                    let layerMediaType = "application/octet-stream+lz4" 
+                    // Remove unused variable: let layerMediaType = "application/octet-stream+lz4" 
 
                     Logger.info(
                         "Processing part \(partNum) of \(totalPartsFromCollector): \(partURL.lastPathComponent)")
@@ -1115,254 +1115,29 @@ class ImageContainerRegistry: @unchecked Sendable {
                     // Seek to the correct offset in the output sparse file
                     try outputHandle.seek(toOffset: currentOffset)
 
+                    // Always attempt decompression using decompressChunkAndWriteSparse for lz4 parts
+                    Logger.info(
+                        "Decompressing part \(partNum) using decompressChunkAndWriteSparse")
+
+                    let decompressedBytesWritten = try decompressChunkAndWriteSparse(
+                        inputPath: partURL.path,
+                        outputHandle: outputHandle,
+                        startOffset: currentOffset
+                    )
+                    currentOffset += decompressedBytesWritten
+                    reassemblyProgressLogger.logProgress(
+                        current: Double(currentOffset) / Double(sizeForTruncate), // Use sizeForTruncate
+                        context: "Reassembling")
+
+                    // Remove the old block that checked getDecompressionCommand and did direct copy
+                    /*
                     if let decompressCmd = getDecompressionCommand(for: layerMediaType) {  // Use extracted mediaType
-                        Logger.info(
-                            "Decompressing part \(partNum) with media type: \(layerMediaType)")
-
-                        // Handle Apple Archive format
-                        let toolPath = String(decompressCmd.dropFirst("apple_archive:".count))
-                        let tempOutputPath = FileManager.default.temporaryDirectory
-                            .appendingPathComponent(UUID().uuidString)
-
-                        // Check input file size before decompression
-                        let inputFileSize =
-                            (try? FileManager.default.attributesOfItem(atPath: partURL.path)[.size]
-                                as? UInt64) ?? 0
-                        Logger.info(
-                            "Part \(partNum) input size: \(ByteCountFormatter.string(fromByteCount: Int64(inputFileSize), countStyle: .file))"
-                        )
-
-                        // Create a process that decompresses to a temporary file
-                        let process = Process()
-                        process.executableURL = URL(fileURLWithPath: toolPath)
-                        process.arguments = [
-                            "extract", "-i", partURL.path, "-o", tempOutputPath.path,
-                        ]
-
-                        // Add error output capture
-                        let errorPipe = Pipe()
-                        process.standardError = errorPipe
-
-                        Logger.info(
-                            "Decompressing Apple Archive format with: \(toolPath) \(process.arguments?.joined(separator: " ") ?? "")"
-                        )
-                        try process.run()
-                        process.waitUntilExit()
-
-                        // Check error output if any
-                        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-                        if !errorData.isEmpty,
-                            let errorString = String(data: errorData, encoding: .utf8)
-                        {
-                            Logger.error("Decompression error output: \(errorString)")
-                        }
-
-                        if process.terminationStatus != 0 {
-                            Logger.error(
-                                "Apple Archive decompression failed with status: \(process.terminationStatus), falling back to direct copy"
-                            )
-                            // Fall back to direct copying (uncompressed)
-                            Logger.info("Copying part \(partNum) directly without decompression...")
-                            try outputHandle.seek(toOffset: currentOffset)
-
-                            let inputHandle = try FileHandle(forReadingFrom: partURL)
-                            defer { try? inputHandle.close() }
-
-                            var bytesWritten: UInt64 = 0
-                            let chunkSize = 1024 * 1024  // 1MB chunks
-                            var chunkCount = 0
-
-                            while true {
-                                let data = autoreleasepool {
-                                    try! inputHandle.read(upToCount: chunkSize) ?? Data()
-                                }
-                                if data.isEmpty { break }
-
-                                try outputHandle.write(contentsOf: data)
-                                bytesWritten += UInt64(data.count)
-                                chunkCount += 1
-
-                                // Update progress
-                                let totalProgress =
-                                    Double(currentOffset + bytesWritten)
-                                    / Double(expectedCompressedTotalSize)
-                                let progressBar = createProgressBar(
-                                    progress: totalProgress, width: 30)
-                                let progressPercent = Int(totalProgress * 100)
-                                let currentSpeed =
-                                    ByteCountFormatter.string(
-                                        fromByteCount: Int64(Double(bytesWritten) / 0.5),
-                                        countStyle: .file) + "/s"
-
-                                print(
-                                    "\r\(progressBar) \(progressPercent)% | Speed: \(currentSpeed) | Part \(partNum) | \(ByteCountFormatter.string(fromByteCount: Int64(currentOffset + bytesWritten), countStyle: .file))     ",
-                                    terminator: "")
-                                fflush(stdout)
-
-                                // Also log to the progress logger for consistency
-                                reassemblyProgressLogger.logProgress(
-                                    current: totalProgress,
-                                    context: "Direct copying")
-                            }
-
-                            Logger.info(
-                                "Part \(partNum) - Direct copy: wrote \(chunkCount) chunks, total bytes: \(ByteCountFormatter.string(fromByteCount: Int64(bytesWritten), countStyle: .file))"
-                            )
-                            currentOffset += bytesWritten
-                            continue
-                        }
-
-                        // Check if the output file exists and has content
-                        let outputExists = FileManager.default.fileExists(
-                            atPath: tempOutputPath.path)
-                        let outputFileSize =
-                            outputExists
-                            ? ((try? FileManager.default.attributesOfItem(
-                                atPath: tempOutputPath.path)[
-                                    .size] as? UInt64) ?? 0) : 0
-                        Logger.info(
-                            "Part \(partNum) - Decompressed output exists: \(outputExists), size: \(ByteCountFormatter.string(fromByteCount: Int64(outputFileSize), countStyle: .file))"
-                        )
-
-                        // If decompression produced an empty file, fall back to direct copy
-                        if outputFileSize == 0 {
-                            Logger.info(
-                                "Decompression resulted in empty file, falling back to direct copy for part \(partNum)"
-                            )
-                            try? FileManager.default.removeItem(at: tempOutputPath)
-
-                            // Fall back to direct copying (uncompressed)
-                            Logger.info("Copying part \(partNum) directly without decompression...")
-                            try outputHandle.seek(toOffset: currentOffset)
-
-                            let inputHandle = try FileHandle(forReadingFrom: partURL)
-                            defer { try? inputHandle.close() }
-
-                            var bytesWritten: UInt64 = 0
-                            let chunkSize = 1024 * 1024  // 1MB chunks
-                            var chunkCount = 0
-
-                            while true {
-                                let data = autoreleasepool {
-                                    try! inputHandle.read(upToCount: chunkSize) ?? Data()
-                                }
-                                if data.isEmpty { break }
-
-                                try outputHandle.write(contentsOf: data)
-                                bytesWritten += UInt64(data.count)
-                                chunkCount += 1
-
-                                // Update progress
-                                let totalProgress =
-                                    Double(currentOffset + bytesWritten)
-                                    / Double(expectedCompressedTotalSize)
-                                let progressBar = createProgressBar(
-                                    progress: totalProgress, width: 30)
-                                let progressPercent = Int(totalProgress * 100)
-                                let currentSpeed =
-                                    ByteCountFormatter.string(
-                                        fromByteCount: Int64(Double(bytesWritten) / 0.5),
-                                        countStyle: .file) + "/s"
-
-                                print(
-                                    "\r\(progressBar) \(progressPercent)% | Speed: \(currentSpeed) | Part \(partNum) | \(ByteCountFormatter.string(fromByteCount: Int64(currentOffset + bytesWritten), countStyle: .file))     ",
-                                    terminator: "")
-                                fflush(stdout)
-
-                                // Also log to the progress logger for consistency
-                                reassemblyProgressLogger.logProgress(
-                                    current: totalProgress,
-                                    context: "Direct copying")
-                            }
-
-                            Logger.info(
-                                "Part \(partNum) - Direct copy: wrote \(chunkCount) chunks, total bytes: \(ByteCountFormatter.string(fromByteCount: Int64(bytesWritten), countStyle: .file))"
-                            )
-                            currentOffset += bytesWritten
-                            continue
-                        }
-
-                        // Read the decompressed file and write to our output
-                        let tempInputHandle = try FileHandle(forReadingFrom: tempOutputPath)
-                        defer {
-                            try? tempInputHandle.close()
-                            try? FileManager.default.removeItem(at: tempOutputPath)
-                        }
-
-                        // Read decompressed data in chunks and write to sparse file
-                        var partDecompressedSize: UInt64 = 0
-                        let chunkSize = 1024 * 1024  // 1MB chunks
-                        var chunkCount = 0
-
-                        while true {
-                            let data = autoreleasepool {  // Help manage memory with large files
-                                try! tempInputHandle.read(upToCount: chunkSize) ?? Data()
-                            }
-                            if data.isEmpty { break }  // End of stream
-
-                            try outputHandle.write(contentsOf: data)
-                            partDecompressedSize += UInt64(data.count)
-                            chunkCount += 1
-
-                            // Update progress based on decompressed size written
-                            let totalProgress =
-                                Double(currentOffset + partDecompressedSize)
-                                / Double(expectedCompressedTotalSize)
-                            reassemblyProgressLogger.logProgress(
-                                current: totalProgress,
-                                context: "Reassembling")
-                        }
-
-                        Logger.info(
-                            "Part \(partNum) - Wrote \(chunkCount) chunks, total bytes: \(ByteCountFormatter.string(fromByteCount: Int64(partDecompressedSize), countStyle: .file))"
-                        )
-                        currentOffset += partDecompressedSize  // Advance offset by decompressed size
+                        // ... [removed decompression logic using external tool] ...
                     } else {
                         // No decompression command available, try direct copy
-                        Logger.info(
-                            "Copying part \(partNum) directly..."
-                        )
-                        try outputHandle.seek(toOffset: currentOffset)
-
-                        let inputHandle = try FileHandle(forReadingFrom: partURL)
-                        defer { try? inputHandle.close() }
-
-                        // Get part size
-                        let partSize =
-                            (try? FileManager.default.attributesOfItem(atPath: partURL.path)[.size]
-                                as? UInt64) ?? 0
-                        Logger.info(
-                            "Direct copy of part \(partNum) with size: \(ByteCountFormatter.string(fromByteCount: Int64(partSize), countStyle: .file))"
-                        )
-
-                        var bytesWritten: UInt64 = 0
-                        let chunkSize = 1024 * 1024  // 1MB chunks
-                        var chunkCount = 0
-
-                        while true {
-                            let data = autoreleasepool {
-                                try! inputHandle.read(upToCount: chunkSize) ?? Data()
-                            }
-                            if data.isEmpty { break }
-
-                            try outputHandle.write(contentsOf: data)
-                            bytesWritten += UInt64(data.count)
-                            chunkCount += 1
-
-                            // Update progress
-                            let totalProgress =
-                                Double(currentOffset + bytesWritten)
-                                / Double(expectedCompressedTotalSize)
-                            reassemblyProgressLogger.logProgress(
-                                current: totalProgress,
-                                context: "Direct copying")
-                        }
-
-                        Logger.info(
-                            "Part \(partNum) - Direct copy: wrote \(chunkCount) chunks, total bytes: \(ByteCountFormatter.string(fromByteCount: Int64(bytesWritten), countStyle: .file))"
-                        )
-                        currentOffset += bytesWritten
+                        // ... [removed direct copy logic] ...
                     }
+                    */
 
                     // Ensure data is written before processing next part (optional but safer)
                     try outputHandle.synchronize()
@@ -1388,11 +1163,6 @@ class ImageContainerRegistry: @unchecked Sendable {
                         "Warning: Final reported size (\(finalSize) bytes) differs from expected size (\(sizeForTruncate) bytes), but this doesn't affect functionality"
                     )
                 }
-
-                // Decompress the assembled disk image if it's in LZFSE compressed format
-                Logger.info(
-                    "Checking if disk image is LZFSE compressed and decompressing if needed...")
-                decompressLZFSEImage(inputPath: outputURL.path)
 
                 // Create a properly formatted disk image
                 Logger.info("Converting assembled data to proper disk image format...")
@@ -1679,13 +1449,17 @@ class ImageContainerRegistry: @unchecked Sendable {
                     "Decompressing part \(collectorPartNum) of \(totalParts) from cache: \(sourceURL.lastPathComponent) at offset \(currentOffset)..."
                 )
 
-                // Use the correct sparse decompression function
+                // Always use the correct sparse decompression function
                 let decompressedBytesWritten = try decompressChunkAndWriteSparse(
                     inputPath: sourceURL.path,
                     outputHandle: outputHandle,
                     startOffset: currentOffset
                 )
                 currentOffset += decompressedBytesWritten
+                // Update progress (using sizeForTruncate which should be available)
+                reassemblyProgressLogger.logProgress(
+                        current: Double(currentOffset) / Double(sizeForTruncate), 
+                        context: "Reassembling Cache")
                 
                 try outputHandle.synchronize() // Optional: Synchronize after each chunk
             }
@@ -1711,10 +1485,6 @@ class ImageContainerRegistry: @unchecked Sendable {
                     "Warning: Final reported size (\(finalSize) bytes) differs from expected size (\(sizeForTruncate) bytes), but this doesn't affect functionality"
                 )
             }
-
-            // Decompress the assembled disk image if it's in LZFSE compressed format
-            Logger.info("Checking if disk image is LZFSE compressed and decompressing if needed...")
-            decompressLZFSEImage(inputPath: outputURL.path)
 
             // Create a properly formatted disk image
             Logger.info("Converting assembled data to proper disk image format...")
