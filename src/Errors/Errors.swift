@@ -58,6 +58,7 @@ enum PullError: Error, LocalizedError {
     case fileCreationFailed(String)
     case reassemblySetupFailed(path: String, underlyingError: Error)
     case missingUncompressedSizeAnnotation
+    case invalidMediaType
     
     var errorDescription: String? {
         switch self {
@@ -81,6 +82,8 @@ enum PullError: Error, LocalizedError {
             return "Failed to set up for reassembly at path: \(path). Underlying error: \(underlyingError.localizedDescription)"
         case .missingUncompressedSizeAnnotation:
             return "Could not find the required uncompressed disk size annotation in the image config.json."
+        case .invalidMediaType:
+            return "Invalid media type"
         }
     }
 }
