@@ -930,6 +930,9 @@ class ImageContainerRegistry: @unchecked Sendable {
             Logger.info("Finished processing layers. Found \(diskParts.count) disk parts to reassemble (Total Lz4 Layers: \(totalPartsFromCollector)).")
             // --- End retrieving parts --- 
 
+            // Add detailed logging for debugging
+            Logger.info("Disk part numbers collected and sorted: \(diskParts.map { $0.0 })")
+
             Logger.info("")  // New line after progress
 
             // Display download statistics
@@ -1068,9 +1071,12 @@ class ImageContainerRegistry: @unchecked Sendable {
                 for partNum in 1...totalPartsFromCollector {
                     // Find the original layer info for this part number
                     // Find the part URL from our collected parts using the logical partNum
+                    Logger.info("Reassembly loop: Looking for partNum \(partNum) in diskParts") // Log loop iteration
                     guard let partInfo = diskParts.first(where: { $0.0 == partNum }) else {
                          // This error should now be less likely, but good to keep
                          Logger.error("Missing required part number \(partNum) in collected parts during reassembly.")
+                         // Add current state log on error
+                         Logger.error("Current disk part numbers available: \(diskParts.map { $0.0 })")
                          throw PullError.missingPart(partNum)
                     }
                     let partURL = partInfo.1 // Get the URL from the tuple
