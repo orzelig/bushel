@@ -453,6 +453,77 @@ final class LumeController {
     }
 
     @MainActor
+    public func pushImage(
+        name: String,
+        imageName: String,
+        tags: [String],
+        registry: String,
+        organization: String,
+        storage: String? = nil,
+        chunkSizeMb: Int = 512,
+        verbose: Bool = false,
+        dryRun: Bool = false,
+        reassemble: Bool = false
+    ) async throws {
+        do {
+            Logger.info(
+                "Pushing VM to registry",
+                metadata: [
+                    "name": name,
+                    "imageName": imageName,
+                    "tags": "\(tags.joined(separator: ", "))",
+                    "registry": registry,
+                    "organization": organization,
+                    "location": storage ?? "default",
+                    "chunk_size": "\(chunkSizeMb)MB",
+                    "dry_run": "\(dryRun)",
+                    "reassemble": "\(reassemble)"
+                ])
+
+            try validatePushParameters(
+                name: name,
+                imageName: imageName,
+                tags: tags,
+                registry: registry,
+                organization: organization
+            )
+
+            // Find the actual location of the VM
+            let actualLocation = try self.validateVMExists(name, storage: storage)
+            
+            // Get the VM directory
+            let vmDir = try home.getVMDirectory(name, storage: actualLocation)
+            
+            // Use ImageContainerRegistry to push the VM 
+            let imageContainerRegistry = ImageContainerRegistry(
+                registry: registry, organization: organization)
+            
+            try await imageContainerRegistry.push(
+                vmDirPath: vmDir.dir.path,
+                imageName: imageName,
+                tags: tags,
+                chunkSizeMb: chunkSizeMb,
+                verbose: verbose,
+                dryRun: dryRun,
+                reassemble: reassemble
+            )
+
+            Logger.info(
+                "VM pushed successfully",
+                metadata: [
+                    "name": name,
+                    "imageName": imageName,
+                    "tags": "\(tags.joined(separator: ", "))",
+                    "registry": registry,
+                    "organization": organization,
+                ])
+        } catch {
+            Logger.error("Failed to push VM", metadata: ["error": error.localizedDescription])
+            throw error
+        }
+    }
+
+    @MainActor
     public func pruneImages() async throws {
         Logger.info("Pruning cached images")
 
@@ -754,5 +825,32 @@ final class LumeController {
         default:
             break
         }
+    }
+
+    private func validatePushParameters(
+        name: String,
+        imageName: String,
+        tags: [String],
+        registry: String,
+        organization: String
+    ) throws {
+        guard !name.isEmpty else {
+            throw ValidationError("VM name cannot be empty")
+        }
+        guard !imageName.isEmpty else {
+            throw ValidationError("Image name cannot be empty")
+        }
+        guard !tags.isEmpty else {
+            throw ValidationError("At least one tag must be provided.")
+        }
+        guard !registry.isEmpty else {
+            throw ValidationError("Registry cannot be empty")
+        }
+        guard !organization.isEmpty else {
+            throw ValidationError("Organization cannot be empty")
+        }
+        
+        // Verify VM exists (this will throw if not found)
+        _ = try self.validateVMExists(name)
     }
 }

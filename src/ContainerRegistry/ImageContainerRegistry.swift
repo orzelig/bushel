@@ -2,8 +2,56 @@ import ArgumentParser
 import Darwin
 import Foundation
 import Swift
+import CommonCrypto
+import Compression // Add this import
+
+// Extension to calculate SHA256 hash
+extension Data {
+    func sha256String() -> String {
+        let hash = self.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> [UInt8] in
+            var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+            CC_SHA256(bytes.baseAddress, CC_LONG(self.count), &hash)
+            return hash
+        }
+        return hash.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+// Push-related errors
+enum PushError: Error {
+    case uploadInitiationFailed
+    case blobUploadFailed
+    case manifestPushFailed
+    case authenticationFailed
+    case missingToken
+    case invalidURL
+    case lz4NotFound // Added error case
+}
+
+struct ChunkMetadata: Codable {
+    let uncompressedDigest: String
+    let uncompressedSize: UInt64
+    let compressedDigest: String
+    let compressedSize: Int
+}
 
 // Define struct to decode relevant parts of config.json
+struct OCIManifestLayer {
+    let mediaType: String
+    let size: Int
+    let digest: String
+    let uncompressedSize: UInt64?
+    let uncompressedContentDigest: String?
+    
+    init(mediaType: String, size: Int, digest: String, uncompressedSize: UInt64? = nil, uncompressedContentDigest: String? = nil) {
+        self.mediaType = mediaType
+        self.size = size
+        self.digest = digest
+        self.uncompressedSize = uncompressedSize
+        self.uncompressedContentDigest = uncompressedContentDigest
+    }
+}
+
 struct OCIConfig: Codable {
     struct Annotations: Codable {
         let uncompressedSize: String?  // Use optional String
@@ -274,6 +322,43 @@ struct DownloadStats {
     }
 }
 
+// Renamed struct
+struct UploadStats {
+    let totalBytes: Int64
+    let uploadedBytes: Int64 // Renamed
+    let elapsedTime: TimeInterval
+    let averageSpeed: Double
+    let peakSpeed: Double
+
+    func formattedSummary() -> String {
+        let bytesStr = ByteCountFormatter.string(fromByteCount: uploadedBytes, countStyle: .file)
+        let avgSpeedStr = formatSpeed(averageSpeed)
+        let peakSpeedStr = formatSpeed(peakSpeed)
+        let timeStr = formatTime(elapsedTime)
+        return """
+            Upload Statistics:
+            - Total uploaded: \(bytesStr)
+            - Elapsed time: \(timeStr)
+            - Average speed: \(avgSpeedStr)
+            - Peak speed: \(peakSpeedStr)
+            """
+    }
+    private func formatSpeed(_ bytesPerSecond: Double) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        let bytesStr = formatter.string(fromByteCount: Int64(bytesPerSecond))
+        return "\(bytesStr)/s"
+    }
+    private func formatTime(_ seconds: TimeInterval) -> String {
+        let hours = Int(seconds) / 3600
+        let minutes = (Int(seconds) % 3600) / 60
+        let secs = Int(seconds) % 60
+        if hours > 0 { return String(format: "%d hours, %d minutes, %d seconds", hours, minutes, secs) }
+        else if minutes > 0 { return String(format: "%d minutes, %d seconds", minutes, secs) }
+        else { return String(format: "%d seconds", secs) }
+    }
+}
+
 actor TaskCounter {
     private var count: Int = 0
 
@@ -285,11 +370,16 @@ actor TaskCounter {
 class ImageContainerRegistry: @unchecked Sendable {
     private let registry: String
     private let organization: String
-    private let progress = ProgressTracker()
+    private let downloadProgress = ProgressTracker() // Renamed for clarity
+    private let uploadProgress = UploadProgressTracker() // Added upload tracker
     private let cacheDirectory: URL
     private let downloadLock = NSLock()
     private var activeDownloads: [String] = []
     private let cachingEnabled: Bool
+
+    // Constants for zero-skipping write logic
+    private static let holeGranularityBytes = 4 * 1024 * 1024 // 4MB block size for checking zeros
+    private static let zeroChunk = Data(count: holeGranularityBytes)
 
     // Add the createProgressBar function here as a private method
     private func createProgressBar(progress: Double, width: Int = 30) -> String {
@@ -613,7 +703,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                 $0.mediaType != "application/vnd.oci.empty.v1+json"
             }.count
             let totalSize = manifest.layers.reduce(0) { $0 + Int64($1.size) }
-            await progress.setTotal(totalSize, files: totalFiles)
+            await downloadProgress.setTotal(totalSize, files: totalFiles)
 
             // Process layers with limited concurrency
             Logger.info("Processing Image layers")
@@ -671,7 +761,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                             // Still need to account for progress
                             group.addTask { [self] in
                                 await counter.increment()
-                                await progress.addProgress(Int64(size))
+                                await downloadProgress.addProgress(Int64(size))
                                 await counter.decrement()
                                 return Int64(size)
                             }
@@ -686,7 +776,7 @@ class ImageContainerRegistry: @unchecked Sendable {
 
                                 if FileManager.default.fileExists(atPath: cachedLayer.path) {
                                     try FileManager.default.copyItem(at: cachedLayer, to: partURL)
-                                    await progress.addProgress(Int64(size))
+                                    await downloadProgress.addProgress(Int64(size))
                                 } else {
                                     // Check if this layer is already being downloaded and we're not skipping cache
                                     if isDownloading(digest) {
@@ -696,7 +786,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                                         {
                                             try FileManager.default.copyItem(
                                                 at: cachedLayer, to: partURL)
-                                            await progress.addProgress(Int64(size))
+                                            await downloadProgress.addProgress(Int64(size))
                                             return Int64(size)
                                         }
                                     }
@@ -711,7 +801,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                                         token: token,
                                         to: partURL,
                                         maxRetries: 5,
-                                        progress: progress,
+                                        progress: downloadProgress,
                                         manifestId: manifestId
                                     )
 
@@ -758,7 +848,7 @@ class ImageContainerRegistry: @unchecked Sendable {
 
                             if FileManager.default.fileExists(atPath: cachedLayer.path) {
                                 try FileManager.default.copyItem(at: cachedLayer, to: outputURL)
-                                await progress.addProgress(Int64(size))
+                                await downloadProgress.addProgress(Int64(size))
                             } else {
                                 // Check if this layer is already being downloaded and we're not skipping cache
                                 if isDownloading(digest) {
@@ -767,7 +857,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                                     if FileManager.default.fileExists(atPath: cachedLayer.path) {
                                         try FileManager.default.copyItem(
                                             at: cachedLayer, to: outputURL)
-                                        await progress.addProgress(Int64(size))
+                                        await downloadProgress.addProgress(Int64(size))
                                         return Int64(size)
                                     }
                                 }
@@ -782,7 +872,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                                     token: token,
                                     to: outputURL,
                                     maxRetries: 5,
-                                    progress: progress,
+                                    progress: downloadProgress,
                                     manifestId: manifestId
                                 )
 
@@ -808,7 +898,7 @@ class ImageContainerRegistry: @unchecked Sendable {
             Logger.info("")  // New line after progress
 
             // Display download statistics
-            let stats = await progress.getDownloadStats()
+            let stats = await downloadProgress.getDownloadStats()
             Logger.info(stats.formattedSummary())
 
             // Parse config.json to get uncompressed size *before* reassembly
@@ -1866,17 +1956,52 @@ class ImageContainerRegistry: @unchecked Sendable {
     }
 
     private func getToken(repository: String) async throws -> String {
-        let url = URL(string: "https://\(self.registry)/token")!
-            .appending(queryItems: [
-                URLQueryItem(name: "service", value: self.registry),
-                URLQueryItem(name: "scope", value: "repository:\(repository):pull"),
-            ])
+        let encodedRepo = repository.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? repository
+        // Request both pull and push scope for uploads
+        let url = URL(string: "https://\(self.registry)/token?scope=repository:\(encodedRepo):pull,push&service=\(self.registry)")!
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET" // Token endpoint uses GET
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        let (data, _) = try await URLSession.shared.data(from: url)
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        guard let token = json?["token"] as? String else {
-            throw PullError.tokenFetchFailed
+        // *** Add Basic Authentication Header if credentials exist ***
+        let (username, password) = getCredentialsFromEnvironment()
+        if let username = username, let password = password, !username.isEmpty, !password.isEmpty {
+            let authString = "\(username):\(password)"
+            if let authData = authString.data(using: .utf8) {
+                let base64Auth = authData.base64EncodedString()
+                request.setValue("Basic \(base64Auth)", forHTTPHeaderField: "Authorization")
+                Logger.info("Adding Basic Authentication header to token request.")
+            } else {
+                Logger.error("Failed to encode credentials for Basic Auth.")
+            }
+        } else {
+            Logger.info("No credentials found in environment for token request.")
+            // Allow anonymous request for pull scope, but push scope likely requires auth
         }
+        // *** End Basic Auth addition ***
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        // Check response status code *before* parsing JSON
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw PushError.authenticationFailed // Or a more generic network error
+        }
+        
+        guard httpResponse.statusCode == 200 else {
+            // Log detailed error including status code and potentially response body
+            let responseBody = String(data: data, encoding: .utf8) ?? "(Could not decode body)"
+            Logger.error("Token request failed with status code: \(httpResponse.statusCode). Response: \(responseBody)")
+            // Throw specific error based on status if needed (e.g., 401 for unauthorized)
+            throw PushError.authenticationFailed 
+        }
+        
+        let jsonResponse = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let token = jsonResponse?["token"] as? String ?? jsonResponse?["access_token"] as? String else {
+            Logger.error("Token not found in registry response.")
+            throw PushError.missingToken
+        }
+        
         return token
     }
 
@@ -2618,4 +2743,746 @@ class ImageContainerRegistry: @unchecked Sendable {
 
         return 0
     }
+
+    // New push method
+    public func push(
+        vmDirPath: String, 
+        imageName: String, 
+        tags: [String],    
+        chunkSizeMb: Int = 512,
+        verbose: Bool = false,
+        dryRun: Bool = false,
+        reassemble: Bool = false
+    ) async throws {
+        Logger.info(
+            "Pushing VM to registry",
+            metadata: [
+                "vm_path": vmDirPath,
+                "imageName": imageName,
+                "tags": "\(tags.joined(separator: ", "))", // Log all tags
+                "registry": registry,
+                "organization": organization,
+                "chunk_size": "\(chunkSizeMb)MB",
+                "dry_run": "\(dryRun)",
+                "reassemble": "\(reassemble)"
+            ])
+            
+        // Remove tag parsing here, imageName is now passed directly
+        // let components = image.split(separator: ":") ...
+        // let imageTag = String(tag)
+        
+        // Get authentication token only if not in dry-run mode
+        var token: String = ""
+        if !dryRun {
+            Logger.info("Getting registry authentication token")
+            token = try await getToken(repository: "\(self.organization)/\(imageName)")
+        } else {
+            Logger.info("Dry run mode: skipping authentication token request")
+        }
+        
+        // Create working directory inside the VM folder for caching/resuming
+        let workDir = URL(fileURLWithPath: vmDirPath).appendingPathComponent(".lume_push_cache")
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        Logger.info("Using push cache directory: \(workDir.path)")
+        
+        // Get VM files that need to be pushed using vmDirPath
+        let diskPath = URL(fileURLWithPath: vmDirPath).appendingPathComponent("disk.img")
+        let configPath = URL(fileURLWithPath: vmDirPath).appendingPathComponent("config.json")
+        let nvramPath = URL(fileURLWithPath: vmDirPath).appendingPathComponent("nvram.bin")
+        
+        var layers: [OCIManifestLayer] = []
+        var uncompressedDiskSize: UInt64? = nil
+
+        // Process config.json
+        let cachedConfigPath = workDir.appendingPathComponent("config.json")
+        var configDigest: String? = nil
+        var configSize: Int? = nil
+        
+        if FileManager.default.fileExists(atPath: cachedConfigPath.path) {
+            Logger.info("Using cached config.json")
+            do {
+                let configData = try Data(contentsOf: cachedConfigPath)
+                configDigest = "sha256:" + configData.sha256String()
+                configSize = configData.count
+                // Try to get uncompressed disk size from cached config
+                if let vmConfig = try? JSONDecoder().decode(VMConfig.self, from: configData) {
+                    uncompressedDiskSize = vmConfig.diskSize
+                    Logger.info("Found disk size in cached config: \(uncompressedDiskSize ?? 0) bytes")
+                }
+            } catch {
+                Logger.error("Failed to read cached config.json: \(error). Will re-process.")
+                // Force re-processing by leaving configDigest nil
+            }
+        } else if FileManager.default.fileExists(atPath: configPath.path) {
+            Logger.info("Processing config.json")
+            let configData = try Data(contentsOf: configPath)
+            configDigest = "sha256:" + configData.sha256String()
+            configSize = configData.count
+            try configData.write(to: cachedConfigPath) // Save to cache
+            // Try to get uncompressed disk size from original config
+            if let vmConfig = try? JSONDecoder().decode(VMConfig.self, from: configData) {
+                uncompressedDiskSize = vmConfig.diskSize
+                Logger.info("Found disk size in config: \(uncompressedDiskSize ?? 0) bytes")
+            }
+        }
+        
+        if var digest = configDigest, let size = configSize { // Use 'var' to modify if uploaded
+             if !dryRun {
+                // Upload only if not in dry-run mode and blob doesn't exist
+                if !(try await blobExists(repository: "\(self.organization)/\(imageName)", digest: digest, token: token)) {
+                    Logger.info("Uploading config.json blob")
+                    let configData = try Data(contentsOf: cachedConfigPath) // Read from cache for upload
+                    digest = try await uploadBlobFromData(
+                        repository: "\(self.organization)/\(imageName)",
+                        data: configData,
+                        token: token
+                    )
+                } else {
+                    Logger.info("Config blob already exists on registry")
+                }
+            }
+            // Add config layer
+            layers.append(OCIManifestLayer(
+                mediaType: "application/vnd.oci.image.config.v1+json",
+                size: size,
+                digest: digest
+            ))
+        }
+        
+        // Process nvram.bin
+        let cachedNvramPath = workDir.appendingPathComponent("nvram.bin")
+        var nvramDigest: String? = nil
+        var nvramSize: Int? = nil
+
+        if FileManager.default.fileExists(atPath: cachedNvramPath.path) {
+            Logger.info("Using cached nvram.bin")
+            do {
+                let nvramData = try Data(contentsOf: cachedNvramPath)
+                nvramDigest = "sha256:" + nvramData.sha256String()
+                nvramSize = nvramData.count
+            } catch {
+                 Logger.error("Failed to read cached nvram.bin: \(error). Will re-process.")
+            }
+        } else if FileManager.default.fileExists(atPath: nvramPath.path) {
+            Logger.info("Processing nvram.bin")
+            let nvramData = try Data(contentsOf: nvramPath)
+            nvramDigest = "sha256:" + nvramData.sha256String()
+            nvramSize = nvramData.count
+            try nvramData.write(to: cachedNvramPath) // Save to cache
+        }
+        
+        if var digest = nvramDigest, let size = nvramSize { // Use 'var'
+             if !dryRun {
+                 // Upload only if not in dry-run mode and blob doesn't exist
+                 if !(try await blobExists(repository: "\(self.organization)/\(imageName)", digest: digest, token: token)) {
+                    Logger.info("Uploading nvram.bin blob")
+                    let nvramData = try Data(contentsOf: cachedNvramPath) // Read from cache
+                    digest = try await uploadBlobFromData(
+                        repository: "\(self.organization)/\(imageName)",
+                        data: nvramData,
+                        token: token
+                    )
+                } else {
+                     Logger.info("NVRAM blob already exists on registry")
+                }
+            }
+            // Add nvram layer
+            layers.append(OCIManifestLayer(
+                mediaType: "application/octet-stream",
+                size: size,
+                digest: digest
+            ))
+        }
+        
+        // Process disk.img
+        if FileManager.default.fileExists(atPath: diskPath.path) {
+            let diskAttributes = try FileManager.default.attributesOfItem(atPath: diskPath.path)
+            let diskSize = diskAttributes[.size] as? UInt64 ?? 0
+            let actualDiskSize = uncompressedDiskSize ?? diskSize
+            Logger.info("Processing disk.img in chunks", metadata: ["disk_path": diskPath.path, "disk_size": "\(diskSize) bytes", "actual_size": "\(actualDiskSize) bytes", "chunk_size": "\(chunkSizeMb)MB"])
+            let chunksDir = workDir.appendingPathComponent("disk.img.parts")
+            try FileManager.default.createDirectory(at: chunksDir, withIntermediateDirectories: true)
+            let chunkSizeBytes = chunkSizeMb * 1024 * 1024
+            let totalChunks = Int((diskSize + UInt64(chunkSizeBytes) - 1) / UInt64(chunkSizeBytes))
+            Logger.info("Splitting disk into \(totalChunks) chunks")
+            let fileHandle = try FileHandle(forReadingFrom: diskPath)
+            defer { try? fileHandle.close() }
+            var pushedDiskLayers: [(index: Int, layer: OCIManifestLayer)] = []
+            var diskChunks: [(index: Int, path: URL, digest: String)] = []
+            
+            try await withThrowingTaskGroup(of: (Int, OCIManifestLayer, URL, String).self) { group in
+                let maxConcurrency = 4
+                for chunkIndex in 0..<totalChunks {
+                    if chunkIndex >= maxConcurrency { if let res = try await group.next() { pushedDiskLayers.append((res.0, res.1)); diskChunks.append((res.0, res.2, res.3)) } }
+                    group.addTask { [token, verbose, dryRun, organization, imageName] in
+                        let chunkIndex = chunkIndex
+                        let chunkPath = chunksDir.appendingPathComponent("chunk.\(chunkIndex)")
+                        let metadataPath = chunksDir.appendingPathComponent("chunk_metadata.\(chunkIndex).json")
+                        var layer: OCIManifestLayer? = nil
+                        var finalCompressedDigest: String? = nil
+                        if FileManager.default.fileExists(atPath: metadataPath.path), FileManager.default.fileExists(atPath: chunkPath.path) {
+                            do {
+                                let metadataData = try Data(contentsOf: metadataPath)
+                                let metadata = try JSONDecoder().decode(ChunkMetadata.self, from: metadataData)
+                                Logger.info("Resuming chunk \(chunkIndex + 1)/\(totalChunks) from cache")
+                                finalCompressedDigest = metadata.compressedDigest
+                                if !dryRun { if !(try await self.blobExists(repository: "\(organization)/\(imageName)", digest: metadata.compressedDigest, token: token)) { Logger.info("Uploading cached chunk \(chunkIndex + 1) blob"); _ = try await self.uploadBlobFromPath(repository: "\(organization)/\(imageName)", path: chunkPath, digest: metadata.compressedDigest, token: token) } else { Logger.info("Chunk \(chunkIndex + 1) blob already exists on registry") } }
+                                layer = OCIManifestLayer(mediaType: "application/octet-stream+lz4", size: metadata.compressedSize, digest: metadata.compressedDigest, uncompressedSize: metadata.uncompressedSize, uncompressedContentDigest: metadata.uncompressedDigest)
+                            } catch { Logger.info("Failed to load cached metadata/chunk for index \(chunkIndex): \(error). Re-processing."); finalCompressedDigest = nil; layer = nil }
+                        }
+                        if layer == nil {
+                            Logger.info("Processing chunk \(chunkIndex + 1)/\(totalChunks)")
+                            let localFileHandle = try FileHandle(forReadingFrom: diskPath)
+                            defer { try? localFileHandle.close() }
+                            try localFileHandle.seek(toOffset: UInt64(chunkIndex * chunkSizeBytes))
+                            let chunkData = try localFileHandle.read(upToCount: chunkSizeBytes) ?? Data()
+                            let uncompressedSize = UInt64(chunkData.count)
+                            let uncompressedDigest = "sha256:" + chunkData.sha256String()
+                            let compressedData = try (chunkData as NSData).compressed(using: .lz4) as Data
+                            let compressedSize = compressedData.count
+                            let compressedDigest = "sha256:" + compressedData.sha256String()
+                            try compressedData.write(to: chunkPath)
+                            let metadata = ChunkMetadata(uncompressedDigest: uncompressedDigest, uncompressedSize: uncompressedSize, compressedDigest: compressedDigest, compressedSize: compressedSize)
+                            let metadataData = try JSONEncoder().encode(metadata)
+                            try metadataData.write(to: metadataPath)
+                            finalCompressedDigest = compressedDigest
+                            if !dryRun { if !(try await self.blobExists(repository: "\(organization)/\(imageName)", digest: compressedDigest, token: token)) { Logger.info("Uploading processed chunk \(chunkIndex + 1) blob"); _ = try await self.uploadBlobFromPath(repository: "\(organization)/\(imageName)", path: chunkPath, digest: compressedDigest, token: token) } else { Logger.info("Chunk \(chunkIndex + 1) blob already exists on registry (processed fresh)") } }
+                            layer = OCIManifestLayer(mediaType: "application/octet-stream+lz4", size: compressedSize, digest: compressedDigest, uncompressedSize: uncompressedSize, uncompressedContentDigest: uncompressedDigest)
+                        }
+                        guard let finalLayer = layer, let finalDigest = finalCompressedDigest else { throw PushError.blobUploadFailed }
+                        if verbose { Logger.info("Finished chunk \(chunkIndex + 1)/\(totalChunks)") }
+                        return (chunkIndex, finalLayer, chunkPath, finalDigest)
+                    }
+                }
+                for try await (index, layer, path, digest) in group { pushedDiskLayers.append((index, layer)); diskChunks.append((index, path, digest)) }
+            }
+            layers.append(contentsOf: pushedDiskLayers.sorted { $0.index < $1.index }.map { $0.layer })
+            diskChunks.sort { $0.index < $1.index }
+            Logger.info("All disk chunks processed successfully")
+
+            // --- Calculate Total Upload Size & Initialize Tracker --- 
+            if !dryRun {
+                var totalUploadSizeBytes: Int64 = 0
+                var totalUploadFiles: Int = 0
+                // Add config size if it exists
+                if let size = configSize {
+                    totalUploadSizeBytes += Int64(size)
+                    totalUploadFiles += 1
+                }
+                // Add nvram size if it exists
+                if let size = nvramSize {
+                     totalUploadSizeBytes += Int64(size)
+                     totalUploadFiles += 1
+                }
+                // Add sizes of all compressed disk chunks
+                let allChunkSizes = diskChunks.compactMap { try? FileManager.default.attributesOfItem(atPath: $0.path.path)[.size] as? Int64 ?? 0 }
+                totalUploadSizeBytes += allChunkSizes.reduce(0, +)
+                totalUploadFiles += totalChunks // Use totalChunks calculated earlier
+                
+                if totalUploadSizeBytes > 0 {
+                    Logger.info("Initializing upload progress: \(totalUploadFiles) files, total size: \(ByteCountFormatter.string(fromByteCount: totalUploadSizeBytes, countStyle: .file))")
+                    await uploadProgress.setTotal(totalUploadSizeBytes, files: totalUploadFiles)
+                    // Print initial progress bar
+                     print("[░░░░░░░░░░░░░░░░░░░░] 0% (0/\(totalUploadFiles)) | Initializing upload... | ETA: calculating...     ")
+                     fflush(stdout)
+                 } else {
+                     Logger.info("No files marked for upload.")
+                 }
+            }
+            // --- End Size Calculation & Init --- 
+
+            // Perform reassembly verification if requested in dry-run mode
+            if dryRun && reassemble {
+                Logger.info("=== REASSEMBLY MODE ===")
+                Logger.info("Reassembling chunks to verify integrity...")
+                let reassemblyDir = workDir.appendingPathComponent("reassembly")
+                try FileManager.default.createDirectory(at: reassemblyDir, withIntermediateDirectories: true)
+                let reassembledFile = reassemblyDir.appendingPathComponent("reassembled_disk.img")
+                Logger.info("Pre-allocating sparse file of \(ByteCountFormatter.string(fromByteCount: Int64(actualDiskSize), countStyle: .file))...")
+                if FileManager.default.fileExists(atPath: reassembledFile.path) { try FileManager.default.removeItem(at: reassembledFile) }
+                guard FileManager.default.createFile(atPath: reassembledFile.path, contents: nil) else { throw PushError.invalidURL }
+                let outputHandle = try FileHandle(forWritingTo: reassembledFile)
+                defer { try? outputHandle.close() }
+                try outputHandle.truncate(atOffset: actualDiskSize)
+                var currentOffset: UInt64 = 0
+                for (index, cachedChunkPath, _) in diskChunks {
+                    Logger.info("Decompressing & writing part \(index + 1)/\(diskChunks.count): \(cachedChunkPath.lastPathComponent) at offset \(currentOffset)...")
+                    let decompressedBytesWritten = try decompressChunkAndWriteSparse(inputPath: cachedChunkPath.path, outputHandle: outputHandle, startOffset: currentOffset)
+                    currentOffset += decompressedBytesWritten
+                }
+                Logger.info("Verifying reassembled file...")
+                let originalSize = diskSize
+                let originalDigest = calculateSHA256(filePath: diskPath.path)
+                let reassembledAttributes = try FileManager.default.attributesOfItem(atPath: reassembledFile.path)
+                let reassembledSize = reassembledAttributes[.size] as? UInt64 ?? 0
+                let reassembledDigest = calculateSHA256(filePath: reassembledFile.path)
+                let originalActualSize = getActualDiskUsage(path: diskPath.path)
+                let reassembledActualSize = getActualDiskUsage(path: reassembledFile.path)
+                Logger.info("Results:")
+                Logger.info("  Original size: \(ByteCountFormatter.string(fromByteCount: Int64(originalSize), countStyle: .file)) (\(originalSize) bytes)")
+                Logger.info("  Reassembled size: \(ByteCountFormatter.string(fromByteCount: Int64(reassembledSize), countStyle: .file)) (\(reassembledSize) bytes)")
+                Logger.info("  Original digest: \(originalDigest)")
+                Logger.info("  Reassembled digest: \(reassembledDigest)")
+                Logger.info("  Original: Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(originalSize), countStyle: .file)), Actual disk usage: \(ByteCountFormatter.string(fromByteCount: Int64(originalActualSize), countStyle: .file))")
+                Logger.info("  Reassembled: Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(reassembledSize), countStyle: .file)), Actual disk usage: \(ByteCountFormatter.string(fromByteCount: Int64(reassembledActualSize), countStyle: .file))")
+                if originalDigest == reassembledDigest { Logger.info("✅ VERIFICATION SUCCESSFUL: Files are identical") } else { Logger.info("❌ VERIFICATION FAILED: Files differ"); if originalSize != reassembledSize { Logger.info("  Size mismatch: Original \(originalSize) bytes, Reassembled \(reassembledSize) bytes") }; Logger.info("Attempting to identify differences..."); Logger.info("NOTE: This might be a sparse file issue. The content may be identical, but sparse regions"); Logger.info("      may be handled differently between the original and reassembled files."); if originalActualSize > 0 { let diffPercentage = ((Double(reassembledActualSize) - Double(originalActualSize)) / Double(originalActualSize)) * 100.0; Logger.info("  Disk usage difference: \(String(format: "%.2f", diffPercentage))%"); if diffPercentage < -40 { Logger.info("  ⚠️ WARNING: Reassembled disk uses significantly less space (>40% difference)."); Logger.info("  This indicates sparse regions weren't properly preserved and may affect VM functionality.") } else if diffPercentage < -10 { Logger.info("  ⚠️ WARNING: Reassembled disk uses less space (10-40% difference)."); Logger.info("  Some sparse regions may not be properly preserved but VM might still function correctly.") } else if diffPercentage > 10 { Logger.info("  ⚠️ WARNING: Reassembled disk uses more space (>10% difference)."); Logger.info("  This is unusual and may indicate improper sparse file handling.") } else { Logger.info("  ✓ Disk usage difference is minimal (<10%). VM likely to function correctly.") } } }
+                Logger.info("Reassembled file is available at: \(reassembledFile.path)")
+                 if originalDigest != reassembledDigest { Logger.info(""); Logger.info("===== ATTEMPTING RECOVERY ACTION ====="); Logger.info("Since verification failed, trying direct copy as a fallback method."); let fallbackFile = reassemblyDir.appendingPathComponent("fallback_disk.img"); Logger.info("Creating fallback disk image at: \(fallbackFile.path)"); let rsyncProcess = Process(); rsyncProcess.executableURL = URL(fileURLWithPath: "/usr/bin/rsync"); rsyncProcess.arguments = ["-aS", "--progress", diskPath.path, fallbackFile.path]; try rsyncProcess.run(); rsyncProcess.waitUntilExit(); if rsyncProcess.terminationStatus == 0 { Logger.info("Direct copy completed. You may want to try using this fallback disk image"); Logger.info("instead if the reassembled one has issues: \(fallbackFile.path)") } else { Logger.info("Direct copy failed. Attempting with cp -c command..."); let cpProcess = Process(); cpProcess.executableURL = URL(fileURLWithPath: "/bin/cp"); cpProcess.arguments = ["-c", diskPath.path, fallbackFile.path]; try cpProcess.run(); cpProcess.waitUntilExit(); if cpProcess.terminationStatus == 0 { Logger.info("Direct copy completed with cp -c. Fallback image available at: \(fallbackFile.path)") } else { Logger.info("All recovery attempts failed.") } } }
+            }
+        }
+
+        // --- Manifest Creation & Push --- 
+        let manifest = createManifest(
+            layers: layers,
+            configLayerIndex: layers.firstIndex(where: { $0.mediaType == "application/vnd.oci.image.config.v1+json" }),
+            uncompressedDiskSize: uncompressedDiskSize
+        )
+
+        // Push manifest only if not in dry-run mode
+        if !dryRun {
+            Logger.info("Pushing manifest(s)") // Updated log
+            // Serialize the manifest dictionary to Data first
+            let manifestData = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+
+            // Loop through tags to push the same manifest data
+            for tag in tags {
+                 Logger.info("Pushing manifest for tag: \(tag)")
+                 try await pushManifest(
+                     repository: "\(self.organization)/\(imageName)",
+                     tag: tag, // Use the current tag from the loop
+                     manifest: manifestData, // Pass the serialized Data
+                     token: token // Token should be in scope here now
+                 )
+            }
+        }
+
+        // Print final upload summary if not dry run
+        if !dryRun {
+            let stats = await uploadProgress.getUploadStats()
+            Logger.info("\n\(stats.formattedSummary())") // Add newline for separation
+        }
+
+        // Clean up cache directory only on successful non-dry-run push
+    }
+    
+    private func createManifest(layers: [OCIManifestLayer], configLayerIndex: Int?, uncompressedDiskSize: UInt64?) -> [String: Any] {
+        var manifest: [String: Any] = [
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "layers": layers.map { layer in
+                var layerDict: [String: Any] = [
+                    "mediaType": layer.mediaType,
+                    "size": layer.size,
+                    "digest": layer.digest
+                ]
+                
+                if let uncompressedSize = layer.uncompressedSize {
+                    var annotations: [String: String] = [:]
+                    annotations["org.trycua.lume.uncompressed-size"] = "\(uncompressedSize)" // Updated prefix
+                    
+                    if let digest = layer.uncompressedContentDigest {
+                        annotations["org.trycua.lume.uncompressed-content-digest"] = digest // Updated prefix
+                    }
+                    
+                    layerDict["annotations"] = annotations
+                }
+                
+                return layerDict
+            }
+        ]
+        
+        // Add config reference if available
+        if let configIndex = configLayerIndex {
+            let configLayer = layers[configIndex]
+            manifest["config"] = [
+                "mediaType": configLayer.mediaType,
+                "size": configLayer.size,
+                "digest": configLayer.digest
+            ]
+        }
+        
+        // Add annotations
+        var annotations: [String: String] = [:]
+        annotations["org.trycua.lume.upload-time"] = ISO8601DateFormatter().string(from: Date()) // Updated prefix
+        
+        if let diskSize = uncompressedDiskSize {
+            annotations["org.trycua.lume.uncompressed-disk-size"] = "\(diskSize)" // Updated prefix
+        }
+        
+        manifest["annotations"] = annotations
+        
+        return manifest
+    }
+    
+    private func uploadBlobFromData(repository: String, data: Data, token: String) async throws -> String {
+        // Calculate digest
+        let digest = "sha256:" + data.sha256String()
+        
+        // Check if blob already exists
+        if try await blobExists(repository: repository, digest: digest, token: token) {
+            Logger.info("Blob already exists: \(digest)")
+            return digest
+        }
+        
+        // Initiate upload
+        let uploadURL = try await startBlobUpload(repository: repository, token: token)
+        
+        // Upload blob
+        try await uploadBlob(url: uploadURL, data: data, digest: digest, token: token)
+        
+        // Report progress
+        await uploadProgress.addProgress(Int64(data.count))
+        
+        return digest
+    }
+    
+    private func uploadBlobFromPath(repository: String, path: URL, digest: String, token: String) async throws -> String {
+        // Check if blob already exists
+        if try await blobExists(repository: repository, digest: digest, token: token) {
+            Logger.info("Blob already exists: \(digest)")
+            return digest
+        }
+        
+        // Initiate upload
+        let uploadURL = try await startBlobUpload(repository: repository, token: token)
+        
+        // Load data from file
+        let data = try Data(contentsOf: path)
+        
+        // Upload blob
+        try await uploadBlob(url: uploadURL, data: data, digest: digest, token: token)
+        
+        // Report progress
+        await uploadProgress.addProgress(Int64(data.count))
+        
+        return digest
+    }
+    
+    private func blobExists(repository: String, digest: String, token: String) async throws -> Bool {
+        let url = URL(string: "https://\(registry)/v2/\(repository)/blobs/\(digest)")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        
+        let (_, response) = try await URLSession.shared.data(for: request)
+        
+        if let httpResponse = response as? HTTPURLResponse {
+            return httpResponse.statusCode == 200
+        }
+        
+        return false
+    }
+    
+    private func startBlobUpload(repository: String, token: String) async throws -> URL {
+        let url = URL(string: "https://\(registry)/v2/\(repository)/blobs/uploads/")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("0", forHTTPHeaderField: "Content-Length") // Explicitly set Content-Length to 0 for POST
+        
+        let (_, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse, 
+              httpResponse.statusCode == 202,
+              let locationString = httpResponse.value(forHTTPHeaderField: "Location") else {
+            // Log response details on failure
+            let responseBody = String(data: (try? await URLSession.shared.data(for: request).0) ?? Data(), encoding: .utf8) ?? "(No Body)"
+             Logger.error("Failed to initiate blob upload. Status: \( (response as? HTTPURLResponse)?.statusCode ?? 0 ). Headers: \( (response as? HTTPURLResponse)?.allHeaderFields ?? [:] ). Body: \(responseBody)")
+            throw PushError.uploadInitiationFailed
+        }
+        
+        // Construct the base URL for the registry
+        guard let baseRegistryURL = URL(string: "https://\(registry)") else {
+            Logger.error("Failed to create base registry URL from: \(registry)")
+             throw PushError.invalidURL
+        }
+        
+        // Create the final upload URL, resolving the location against the base URL
+        guard let uploadURL = URL(string: locationString, relativeTo: baseRegistryURL) else {
+            Logger.error("Failed to create absolute upload URL from location: \(locationString) relative to base: \(baseRegistryURL.absoluteString)")
+            throw PushError.invalidURL
+        }
+        
+        Logger.info("Blob upload initiated. Upload URL: \(uploadURL.absoluteString)")
+        return uploadURL.absoluteURL // Ensure it's absolute
+    }
+    
+    private func uploadBlob(url: URL, data: Data, digest: String, token: String) async throws {
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: true)!
+        
+        // Add digest parameter
+        var queryItems = components.queryItems ?? []
+        queryItems.append(URLQueryItem(name: "digest", value: digest))
+        components.queryItems = queryItems
+        
+        guard let uploadURL = components.url else {
+            throw PushError.invalidURL
+        }
+        
+        var request = URLRequest(url: uploadURL)
+        request.httpMethod = "PUT"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.setValue("\(data.count)", forHTTPHeaderField: "Content-Length")
+        request.httpBody = data
+        
+        let (_, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 201 else {
+            throw PushError.blobUploadFailed
+        }
+    }
+    
+    private func pushManifest(repository: String, tag: String, manifest: Data, token: String) async throws {
+        let url = URL(string: "https://\(registry)/v2/\(repository)/manifests/\(tag)")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/vnd.oci.image.manifest.v1+json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = manifest
+        
+        let (_, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 201 else {
+            throw PushError.manifestPushFailed
+        }
+    }
+    
+    private func getCredentialsFromEnvironment() -> (String?, String?) {
+        let username = ProcessInfo.processInfo.environment["GITHUB_USERNAME"] ?? 
+                      ProcessInfo.processInfo.environment["GHCR_USERNAME"]
+        let password = ProcessInfo.processInfo.environment["GITHUB_TOKEN"] ?? 
+                      ProcessInfo.processInfo.environment["GHCR_TOKEN"]
+        return (username, password)
+    }
+
+    // Add these helper methods for dry-run and reassemble implementation
+    
+    // NEW Helper function using Compression framework and sparse writing
+    private func decompressChunkAndWriteSparse(inputPath: String, outputHandle: FileHandle, startOffset: UInt64) throws -> UInt64 {
+        guard FileManager.default.fileExists(atPath: inputPath) else {
+            Logger.error("Compressed chunk not found at: \(inputPath)")
+            return 0 // Or throw an error
+        }
+
+        let sourceData = try Data(contentsOf: URL(fileURLWithPath: inputPath), options: .alwaysMapped)
+        var currentWriteOffset = startOffset
+        var totalDecompressedBytes: UInt64 = 0
+        var sourceReadOffset = 0 // Keep track of how much compressed data we've provided
+
+        // Use the initializer with the readingFrom closure
+        let filter = try InputFilter(.decompress, using: .lz4) { (length: Int) -> Data? in
+            let bytesAvailable = sourceData.count - sourceReadOffset
+            if bytesAvailable == 0 {
+                return nil // No more data
+            }
+            let bytesToRead = min(length, bytesAvailable)
+            let chunk = sourceData.subdata(in: sourceReadOffset ..< sourceReadOffset + bytesToRead)
+            sourceReadOffset += bytesToRead
+            return chunk
+        }
+
+        // Process the decompressed output by reading from the filter
+        while let decompressedData = try filter.readData(ofLength: Self.holeGranularityBytes) {
+            if decompressedData.isEmpty { break } // End of stream
+
+            // Check if the chunk is all zeros
+            if decompressedData.count == Self.holeGranularityBytes && decompressedData == Self.zeroChunk {
+                // It's a zero chunk, just advance the offset, don't write
+                currentWriteOffset += UInt64(decompressedData.count)
+            } else {
+                // Not a zero chunk (or a partial chunk at the end), write it
+                try outputHandle.seek(toOffset: currentWriteOffset)
+                try outputHandle.write(contentsOf: decompressedData)
+                currentWriteOffset += UInt64(decompressedData.count)
+            }
+            totalDecompressedBytes += UInt64(decompressedData.count)
+        }
+        
+        // No explicit finalize needed when initialized with source data
+
+        return totalDecompressedBytes
+    }
+
+    // Helper function to calculate SHA256 hash of a file
+    private func calculateSHA256(filePath: String) -> String {
+        guard FileManager.default.fileExists(atPath: filePath) else {
+            return "file-not-found"
+        }
+        
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
+        process.arguments = ["-a", "256", filePath]
+        
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            
+            if let data = try outputPipe.fileHandleForReading.readToEnd(),
+               let output = String(data: data, encoding: .utf8) {
+                return output.components(separatedBy: " ").first ?? "hash-calculation-failed"
+            }
+        } catch {
+            Logger.error("SHA256 calculation failed: \(error)")
+        }
+        
+        return "hash-calculation-failed"
+    }
 }
+
+actor UploadProgressTracker {
+    private var totalBytes: Int64 = 0
+    private var uploadedBytes: Int64 = 0 // Renamed
+    private var progressLogger = ProgressLogger(threshold: 0.01) 
+    private var totalFiles: Int = 0 // Keep track of total items
+    private var completedFiles: Int = 0 // Keep track of completed items
+
+    // Upload speed tracking
+    private var startTime: Date = Date()
+    private var lastUpdateTime: Date = Date()
+    private var lastUpdateBytes: Int64 = 0
+    private var speedSamples: [Double] = []
+    private var peakSpeed: Double = 0
+    private var totalElapsedTime: TimeInterval = 0
+
+    // Smoothing factor for speed calculation
+    private var speedSmoothing: Double = 0.3
+    private var smoothedSpeed: Double = 0
+
+    func setTotal(_ total: Int64, files: Int) {
+        totalBytes = total
+        totalFiles = files
+        startTime = Date()
+        lastUpdateTime = startTime
+        uploadedBytes = 0 // Reset uploaded bytes
+        completedFiles = 0 // Reset completed files
+        smoothedSpeed = 0
+        speedSamples = []
+        peakSpeed = 0
+        totalElapsedTime = 0
+    }
+
+    func addProgress(_ bytes: Int64) {
+        uploadedBytes += bytes
+        completedFiles += 1 // Increment completed files count
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastUpdateTime)
+
+        // Show first progress update immediately, then throttle updates
+        let shouldUpdate = (uploadedBytes <= bytes) || (elapsed >= 0.5) || (completedFiles == totalFiles)
+
+        if shouldUpdate && totalBytes > 0 { // Ensure totalBytes is set
+            let currentSpeed = Double(uploadedBytes - lastUpdateBytes) / max(elapsed, 0.001)
+            speedSamples.append(currentSpeed)
+
+            // Cap samples array
+            if speedSamples.count > 20 {
+                speedSamples.removeFirst(speedSamples.count - 20)
+            }
+
+            peakSpeed = max(peakSpeed, currentSpeed)
+
+            // Apply exponential smoothing
+            if smoothedSpeed == 0 { smoothedSpeed = currentSpeed } 
+            else { smoothedSpeed = speedSmoothing * currentSpeed + (1 - speedSmoothing) * smoothedSpeed }
+
+            let recentAvgSpeed = calculateAverageSpeed()
+            let totalElapsed = now.timeIntervalSince(startTime)
+            let overallAvgSpeed = totalElapsed > 0 ? Double(uploadedBytes) / totalElapsed : 0
+
+            let progress = totalBytes > 0 ? Double(uploadedBytes) / Double(totalBytes) : 1.0 // Avoid division by zero
+            logSpeedProgress(
+                current: progress,
+                currentSpeed: currentSpeed,
+                averageSpeed: recentAvgSpeed,
+                smoothedSpeed: smoothedSpeed,
+                overallSpeed: overallAvgSpeed,
+                peakSpeed: peakSpeed,
+                context: "Uploading Image" // Changed context
+            )
+
+            lastUpdateTime = now
+            lastUpdateBytes = uploadedBytes
+            totalElapsedTime = totalElapsed
+        }
+    }
+
+    private func calculateAverageSpeed() -> Double {
+        guard !speedSamples.isEmpty else { return 0 }
+        var totalWeight = 0.0
+        var weightedSum = 0.0
+        let samples = speedSamples.suffix(min(8, speedSamples.count))
+        for (index, speed) in samples.enumerated() {
+            let weight = Double(index + 1)
+            weightedSum += speed * weight
+            totalWeight += weight
+        }
+        return totalWeight > 0 ? weightedSum / totalWeight : 0
+    }
+
+    // Use the UploadStats struct
+    func getUploadStats() -> UploadStats {
+        let avgSpeed = totalElapsedTime > 0 ? Double(uploadedBytes) / totalElapsedTime : 0
+        return UploadStats(
+            totalBytes: totalBytes,
+            uploadedBytes: uploadedBytes, // Renamed
+            elapsedTime: totalElapsedTime,
+            averageSpeed: avgSpeed,
+            peakSpeed: peakSpeed
+        )
+    }
+
+    private func logSpeedProgress(
+        current: Double,
+        currentSpeed: Double,
+        averageSpeed: Double,
+        smoothedSpeed: Double,
+        overallSpeed: Double,
+        peakSpeed: Double,
+        context: String
+    ) {
+        let progressPercent = Int(current * 100)
+        // let currentSpeedStr = formatByteSpeed(currentSpeed) // Removed unused
+        let avgSpeedStr = formatByteSpeed(averageSpeed)
+        // let peakSpeedStr = formatByteSpeed(peakSpeed) // Removed unused
+        let remainingBytes = totalBytes - uploadedBytes
+        let speedForEta = max(smoothedSpeed, averageSpeed * 0.8)
+        let etaSeconds = speedForEta > 0 ? Double(remainingBytes) / speedForEta : 0
+        let etaStr = formatTimeRemaining(etaSeconds)
+        let progressBar = createProgressBar(progress: current)
+        let fileProgress = "(\(completedFiles)/\(totalFiles))" // Add file count
+
+        print(
+            "\r\(progressBar) \(progressPercent)% \(fileProgress) | Speed: \(avgSpeedStr) (Avg) | ETA: \(etaStr)     ", // Simplified output
+            terminator: "")
+        fflush(stdout)
+    }
+
+    // Helper methods (createProgressBar, formatByteSpeed, formatTimeRemaining) remain the same
+    private func createProgressBar(progress: Double, width: Int = 30) -> String {
+        let completedWidth = Int(progress * Double(width))
+        let remainingWidth = width - completedWidth
+        let completed = String(repeating: "█", count: completedWidth)
+        let remaining = String(repeating: "░", count: remainingWidth)
+        return "[\(completed)\(remaining)]"
+    }
+    private func formatByteSpeed(_ bytesPerSecond: Double) -> String {
+        let units = ["B/s", "KB/s", "MB/s", "GB/s"]
+        var speed = bytesPerSecond
+        var unitIndex = 0
+        while speed > 1024 && unitIndex < units.count - 1 { speed /= 1024; unitIndex += 1 }
+        return String(format: "%.1f %@", speed, units[unitIndex])
+    }
+    private func formatTimeRemaining(_ seconds: Double) -> String {
+        if seconds.isNaN || seconds.isInfinite || seconds <= 0 { return "calculating..." }
+        let hours = Int(seconds) / 3600
+        let minutes = (Int(seconds) % 3600) / 60
+        let secs = Int(seconds) % 60
+        if hours > 0 { return String(format: "%d:%02d:%02d", hours, minutes, secs) }
+        else { return String(format: "%d:%02d", minutes, secs) }
+    }
+}
+

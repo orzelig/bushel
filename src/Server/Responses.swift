@@ -4,6 +4,19 @@ struct APIError: Codable {
     let message: String
 }
 
+// Helper struct to encode mixed-type dictionaries
+struct AnyEncodable: Encodable {
+    private let value: Encodable
+
+    init(_ value: Encodable) {
+        self.value = value
+    }
+
+    func encode(to encoder: Encoder) throws {
+        try value.encode(to: encoder)
+    }
+}
+
 extension HTTPResponse {
     static func json<T: Encodable>(_ value: T) throws -> HTTPResponse {
         let data = try JSONEncoder().encode(value)
