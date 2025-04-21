@@ -1521,39 +1521,52 @@ class ImageContainerRegistry: @unchecked Sendable {
             throw PullError.fileCreationFailed(diskImgPath.path)
         }
         
-        // 5. Set up file handle and create sparse file
-        let outputHandle = try FileHandle(forWritingTo: diskImgPath)
-        try outputHandle.truncate(atOffset: diskSize)
+        // IMPORTANT: Use autoreleasepool to ensure file handle is released promptly
+        try autoreleasepool {
+            // 5. Set up file handle and create sparse file
+            let outputHandle = try FileHandle(forWritingTo: diskImgPath)
+            try outputHandle.truncate(atOffset: diskSize)
+            
+            // 6. Write test patterns at beginning and end
+            Logger.info("Writing test patterns to verify writability...")
+            let testPattern = "LUME_TEST_PATTERN".data(using: .utf8)!
+            try outputHandle.seek(toOffset: 0)
+            try outputHandle.write(contentsOf: testPattern)
+            try outputHandle.seek(toOffset: diskSize - UInt64(testPattern.count))
+            try outputHandle.write(contentsOf: testPattern)
+            try outputHandle.synchronize()
+            
+            // 7. Decompress the original data at offset 0
+            Logger.info("Decompressing original disk image with same mechanism as cache pull...")
+            let bytesWritten = try decompressChunkAndWriteSparse(
+                inputPath: backupPath.path,
+                outputHandle: outputHandle,
+                startOffset: 0
+            )
+            
+            Logger.info("Decompressed \(ByteCountFormatter.string(fromByteCount: Int64(bytesWritten), countStyle: .file)) of disk image data")
+            
+            // 8. Ensure all data is written to disk with an explicit sync
+            try outputHandle.synchronize()
+            
+            // Very important: explicitly close the handle here inside the autorelease pool
+            try outputHandle.close()
+            Logger.info("File handle explicitly closed after decompression and synchronization")
+        }
         
-        // 6. Write test patterns at beginning and end
-        Logger.info("Writing test patterns to verify writability...")
-        let testPattern = "LUME_TEST_PATTERN".data(using: .utf8)!
-        try outputHandle.seek(toOffset: 0)
-        try outputHandle.write(contentsOf: testPattern)
-        try outputHandle.seek(toOffset: diskSize - UInt64(testPattern.count))
-        try outputHandle.write(contentsOf: testPattern)
-        try outputHandle.synchronize()
-        
-        // 7. Decompress the original data at offset 0
-        Logger.info("Decompressing original disk image with same mechanism as cache pull...")
-        let bytesWritten = try decompressChunkAndWriteSparse(
-            inputPath: backupPath.path,
-            outputHandle: outputHandle,
-            startOffset: 0
-        )
-        
-        Logger.info("Decompressed \(ByteCountFormatter.string(fromByteCount: Int64(bytesWritten), countStyle: .file)) of disk image data")
-        
-        // 8. Ensure all data is written to disk with an explicit sync
-        try outputHandle.synchronize()
-        
-        // Very important: close the handle before optimization
-        try outputHandle.close()
+        // Wait a moment for file system operations to complete
+        Thread.sleep(forTimeInterval: 0.5)
         
         // 9. Optimize sparse file with cp -c (exactly matching cache pull process)
         if FileManager.default.fileExists(atPath: "/bin/cp") {
             Logger.info("Optimizing sparse file representation...")
             let optimizedPath = diskImgPath.path + ".optimized"
+            
+            // Run a sync before optimization
+            let syncBeforeOptimize = Process()
+            syncBeforeOptimize.executableURL = URL(fileURLWithPath: "/bin/sync")
+            try syncBeforeOptimize.run()
+            syncBeforeOptimize.waitUntilExit()
             
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/cp")
