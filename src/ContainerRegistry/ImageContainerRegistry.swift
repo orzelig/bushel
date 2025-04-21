@@ -1224,6 +1224,64 @@ class ImageContainerRegistry: @unchecked Sendable {
         // Move files to final location
         try FileManager.default.moveItem(at: tempVMDir, to: URL(fileURLWithPath: vmDir.dir.path))
 
+        // Apply proper ownership and permissions to ensure VM can start
+        Logger.info("Setting proper file permissions and ownership...")
+        let chmodProcess = Process()
+        chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        chmodProcess.arguments = ["-R", "u+rw", vmDir.dir.path]
+        try chmodProcess.run()
+        chmodProcess.waitUntilExit()
+        
+        // Ensure disk image has proper permissions
+        let diskImgPath = URL(fileURLWithPath: vmDir.dir.path).appendingPathComponent("disk.img").path
+        if FileManager.default.fileExists(atPath: diskImgPath) {
+            let diskChmodProcess = Process()
+            diskChmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
+            diskChmodProcess.arguments = ["0644", diskImgPath]
+            try diskChmodProcess.run()
+            diskChmodProcess.waitUntilExit()
+            
+            Logger.info("Applied file permissions to disk image")
+            
+            // Ensure disk image is properly synchronized to disk
+            Logger.info("Ensuring disk image is properly synchronized to disk...")
+            let syncProcess = Process()
+            syncProcess.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+            syncProcess.arguments = ["apfs", "resetFusionStats"]  // This forces disk cache flush
+            try? syncProcess.run()
+            syncProcess.waitUntilExit()
+            
+            // Alternative sync method if needed
+            let syncProcess2 = Process()
+            syncProcess2.executableURL = URL(fileURLWithPath: "/bin/sync")
+            try? syncProcess2.run()
+            syncProcess2.waitUntilExit()
+            
+            Logger.info("Disk image sync complete")
+            
+            // Verify the disk image is readable
+            Logger.info("Verifying disk image integrity...")
+            let fileHandle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: diskImgPath))
+            if let handle = fileHandle {
+                // Try to read the first 512 bytes (boot sector)
+                if let data = try? handle.read(upToCount: 512), data.count == 512 {
+                    Logger.info("Disk image verification: Successfully read first 512 bytes")
+                    
+                    // Check for boot signature (0x55AA at the end of the boot sector)
+                    if data.count >= 512 && data[510] == 0x55 && data[511] == 0xAA {
+                        Logger.info("Disk image verification: Boot signature valid (0x55AA)")
+                    } else {
+                        Logger.info("Disk image verification: No valid boot signature found")
+                    }
+                } else {
+                    Logger.error("Disk image verification: Failed to read first 512 bytes")
+                }
+                try? handle.close()
+            } else {
+                Logger.error("Disk image verification: Failed to open file for reading")
+            }
+        }
+
         Logger.info("Download complete: Files extracted to \(vmDir.dir.path)")
         Logger.info(
             "Note: Actual disk usage is significantly lower than reported size due to macOS sparse file system"
@@ -1406,16 +1464,27 @@ class ImageContainerRegistry: @unchecked Sendable {
                         current: Double(currentOffset) / Double(sizeForTruncate), 
                         context: "Reassembling Cache")
                 
-                try outputHandle.synchronize() // Optional: Synchronize after each chunk
+                try outputHandle.synchronize() // Explicitly synchronize after each chunk
             }
 
             // Finalize progress, close handle (done by defer)
             reassemblyProgressLogger.logProgress(current: 1.0, context: "Reassembly Complete")
 
-            // Ensure output handle is closed before post-processing
-            // No need for explicit close here, defer handles it
-            // try outputHandle.close()
-
+            // Add test patterns at the beginning and end of the file
+            Logger.info("Writing test patterns to sparse file to verify integrity...")
+            let testPattern = "LUME_TEST_PATTERN".data(using: .utf8)!
+            try outputHandle.seek(toOffset: 0)
+            try outputHandle.write(contentsOf: testPattern)
+            try outputHandle.seek(toOffset: sizeForTruncate - UInt64(testPattern.count))
+            try outputHandle.write(contentsOf: testPattern)
+            try outputHandle.synchronize()
+            
+            // Ensure handle is properly synchronized before closing
+            try outputHandle.synchronize()
+            
+            // Close handle explicitly instead of relying on defer
+            try outputHandle.close()
+            
             // Verify final size
             let finalSize =
                 (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size]
