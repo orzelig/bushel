@@ -1501,66 +1501,32 @@ class ImageContainerRegistry: @unchecked Sendable {
             return
         }
         
-        // 2. Create a temporary directory for the simulation
-        let simCacheDir = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "lume_simcache_\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: simCacheDir, withIntermediateDirectories: true)
-        defer {
-            try? FileManager.default.removeItem(at: simCacheDir)
+        // Get the file size
+        let attributes = try FileManager.default.attributesOfItem(atPath: diskImgPath.path)
+        guard let diskSize = attributes[.size] as? UInt64, diskSize > 0 else {
+            Logger.error("Could not determine disk.img size for simulation")
+            return
         }
         
-        // 3. Copy the disk.img to the simulation directory
-        let cachedDiskPath = simCacheDir.appendingPathComponent("cached_disk.img")
-        try FileManager.default.copyItem(at: diskImgPath, to: cachedDiskPath)
+        // 2. Rename the original file to .original
+        let originalPath = tempVMDir.appendingPathComponent("disk.img.original")
+        try FileManager.default.moveItem(at: diskImgPath, to: originalPath)
         
-        // 4. Delete original disk.img (will be replaced by the simulated cache pull)
-        try FileManager.default.removeItem(at: diskImgPath)
-        
-        // 5. Get disk size which will be needed for the sparse file
-        var diskSize: UInt64 = 0
-        if let attributes = try? FileManager.default.attributesOfItem(atPath: cachedDiskPath.path),
-           let size = attributes[.size] as? UInt64 {
-            diskSize = size
-        } else {
-            // If size can't be determined, read config.json
-            let configPath = tempVMDir.appendingPathComponent("config.json")
-            if let configDiskSize = getUncompressedSizeFromConfig(configPath: configPath) {
-                diskSize = configDiskSize
-            } else {
-                // Try to get from VM config
-                if FileManager.default.fileExists(atPath: configPath.path) {
-                    do {
-                        let configData = try Data(contentsOf: configPath)
-                        if let vmConfig = try? JSONDecoder().decode(VMConfig.self, from: configData),
-                           let size = vmConfig.diskSize {
-                            diskSize = size
-                        }
-                    } catch {
-                        Logger.error("Failed to read config for disk size: \(error)")
-                    }
-                }
-            }
-        }
-        
-        // Fallback if no size could be determined
-        if diskSize == 0 {
-            diskSize = 10 * 1024 * 1024 * 1024 // 10GB default
-            Logger.error("Could not determine disk size, using default: \(diskSize) bytes")
-        }
-        
-        // 6. Create the sparse file with proper size
+        // 3. Create a new empty file with the same name
         guard FileManager.default.createFile(atPath: diskImgPath.path, contents: nil) else {
+            // If creation fails, restore the original
+            try? FileManager.default.moveItem(at: originalPath, to: diskImgPath)
             throw PullError.fileCreationFailed(diskImgPath.path)
         }
         
+        // 4. Open a file handle for writing to the new file
         let outputHandle = try FileHandle(forWritingTo: diskImgPath)
-        defer { try? outputHandle.close() }
         
-        // Set the file size (creates sparse file)
+        // 5. Set the total size (creates a sparse file)
         try outputHandle.truncate(atOffset: diskSize)
-        Logger.info("Sparse file initialized for simulated cache pull with size: \(ByteCountFormatter.string(fromByteCount: Int64(diskSize), countStyle: .file))")
+        Logger.info("Created sparse file with size: \(ByteCountFormatter.string(fromByteCount: Int64(diskSize), countStyle: .file))")
         
-        // 7. Add test patterns at beginning and end
+        // 6. Add test patterns at beginning and end (same as in copyFromCache)
         let testPattern = "LUME_TEST_PATTERN".data(using: .utf8)!
         try outputHandle.seek(toOffset: 0)
         try outputHandle.write(contentsOf: testPattern)
@@ -1568,37 +1534,22 @@ class ImageContainerRegistry: @unchecked Sendable {
         try outputHandle.write(contentsOf: testPattern)
         try outputHandle.synchronize()
         
-        // 8. Copy data from the cached file
-        let sourceHandle = try FileHandle(forReadingFrom: cachedDiskPath)
-        defer { try? sourceHandle.close() }
+        Logger.info("Test patterns written, starting decompression simulation...")
         
-        // Copy in 50MB chunks to maintain sparse files
-        let chunkSize = 50 * 1024 * 1024
-        var currentOffset: UInt64 = 0
-        var progressLogger = ProgressLogger(threshold: 0.05)
+        // 7. Use decompressChunkAndWriteSparse - the EXACT same function used by copyFromCache
+        let bytesWritten = try decompressChunkAndWriteSparse(
+            inputPath: originalPath.path,
+            outputHandle: outputHandle,
+            startOffset: 0
+        )
         
-        while currentOffset < diskSize {
-            try sourceHandle.seek(toOffset: currentOffset)
-            if let chunkData = try sourceHandle.read(upToCount: chunkSize) {
-                if chunkData.isEmpty { break }
-                
-                try outputHandle.seek(toOffset: currentOffset)
-                try outputHandle.write(contentsOf: chunkData)
-                currentOffset += UInt64(chunkData.count)
-                
-                progressLogger.logProgress(
-                    current: Double(currentOffset) / Double(diskSize),
-                    context: "Simulating Cache Pull"
-                )
-            } else {
-                break
-            }
-        }
-        
+        // 8. Make sure the file handle is properly synchronized before closing
         try outputHandle.synchronize()
-        try outputHandle.close() // Close explicitly before optimizing
+        try outputHandle.close()
         
-        // 9. Optimize the sparse file with cp -c (same as in copyFromCache)
+        Logger.info("Decompressed \(ByteCountFormatter.string(fromByteCount: Int64(bytesWritten), countStyle: .file)) using the same method as cache pull")
+        
+        // 9. Use the same sparse file optimization as copyFromCache
         if FileManager.default.fileExists(atPath: "/bin/cp") {
             Logger.info("Optimizing sparse file representation for simulated cache pull...")
             let optimizedPath = diskImgPath.path + ".optimized"
@@ -1612,42 +1563,43 @@ class ImageContainerRegistry: @unchecked Sendable {
                 process.waitUntilExit()
                 
                 if process.terminationStatus == 0 {
-                    // Get size of optimized file
                     let optimizedSize = (try? FileManager.default.attributesOfItem(atPath: optimizedPath)[.size] as? UInt64) ?? 0
                     let originalUsage = getActualDiskUsage(path: diskImgPath.path)
                     let optimizedUsage = getActualDiskUsage(path: optimizedPath)
                     
                     Logger.info(
-                        "Sparse optimization results for simulated cache: Before: \(ByteCountFormatter.string(fromByteCount: Int64(originalUsage), countStyle: .file)) actual usage, After: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedUsage), countStyle: .file)) actual usage (Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedSize), countStyle: .file)))"
+                        "Sparse optimization results: Before: \(ByteCountFormatter.string(fromByteCount: Int64(originalUsage), countStyle: .file)) actual usage, After: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedUsage), countStyle: .file)) actual usage (Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedSize), countStyle: .file)))"
                     )
                     
-                    // Replace the original with the optimized version
+                    // Replace original with optimized
                     try FileManager.default.removeItem(at: diskImgPath)
                     try FileManager.default.moveItem(at: URL(fileURLWithPath: optimizedPath), to: diskImgPath)
-                    Logger.info("Replaced with optimized sparse version for simulated cache")
+                    Logger.info("Replaced with optimized sparse version")
                 } else {
-                    Logger.info("Sparse optimization failed for simulated cache, using original file")
+                    Logger.info("Sparse optimization failed, using original file")
                     try? FileManager.default.removeItem(atPath: optimizedPath)
                 }
             } catch {
-                Logger.info("Error during sparse optimization for simulated cache: \(error.localizedDescription)")
+                Logger.info("Error during sparse optimization: \(error.localizedDescription)")
                 try? FileManager.default.removeItem(atPath: optimizedPath)
             }
         }
         
-        // 10. Ensure disk image is properly synchronized to disk
-        Logger.info("Ensuring disk image is properly synchronized for simulated cache...")
-        let syncProcess = Process()
-        syncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
-        try? syncProcess.run()
-        syncProcess.waitUntilExit()
-        
-        // Set proper permissions on the disk image
+        // 10. Set permissions and do final sync
         let chmodProcess = Process()
         chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
         chmodProcess.arguments = ["0644", diskImgPath.path]
         try chmodProcess.run()
         chmodProcess.waitUntilExit()
+        
+        // Final sync
+        let syncProcess = Process()
+        syncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
+        try? syncProcess.run()
+        syncProcess.waitUntilExit()
+        
+        // 11. Clean up
+        try? FileManager.default.removeItem(at: originalPath)
         
         Logger.info("Simulated cache pull completed successfully")
     }
