@@ -1069,9 +1069,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                 // Iterate using the reliable totalParts count from media type
                 // Use totalPartsFromCollector for the loop range
                 for partNum in 1...totalPartsFromCollector {
-                    // Find the original layer info for this part number
                     // Find the part URL from our collected parts using the logical partNum
-                    Logger.info("Reassembly loop: Looking for partNum \(partNum) in diskParts") // Log loop iteration
                     guard let partInfo = diskParts.first(where: { $0.0 == partNum }) else {
                          // This error should now be less likely, but good to keep
                          Logger.error("Missing required part number \(partNum) in collected parts during reassembly.")
@@ -1081,65 +1079,45 @@ class ImageContainerRegistry: @unchecked Sendable {
                     }
                     let partURL = partInfo.1 // Get the URL from the tuple
                     
-                    // We no longer need to find the original manifest layer here,
-                    // as all parts collected by the collector should be the lz4 type.
-                    // Remove the block that used extractPartInfo:
-                    /* 
-                    guard let layer = manifest.layers.first(where: { layer in
-                         if let info = extractPartInfo(from: layer.mediaType) { 
-                             return info.partNum == partNum 
-                         }
-                         return false
-                    }) else {
-                         // Should not happen if totalParts was derived correctly
-                         Logger.error("Could not find manifest layer for logical part number \(partNum).")
-                         throw PullError.missingPart(partNum) // Or a different error
-                    }
-                    let layerMediaType = layer.mediaType 
-                    */
-                    // Assume the media type for decompression purposes
-                    // Remove unused variable: let layerMediaType = "application/octet-stream+lz4" 
-
                     Logger.info(
                         "Processing part \(partNum) of \(totalPartsFromCollector): \(partURL.lastPathComponent)")
-
-                    let inputHandle = try FileHandle(forReadingFrom: partURL)
-                    defer {
-                        try? inputHandle.close()
-                        // Clean up temp downloaded part if not from cache
-                        if !partURL.path.contains(cacheDirectory.path) {
-                            try? FileManager.default.removeItem(at: partURL)
-                        }
-                    }
 
                     // Seek to the correct offset in the output sparse file
                     try outputHandle.seek(toOffset: currentOffset)
 
-                    // Always attempt decompression using decompressChunkAndWriteSparse for lz4 parts
-                    Logger.info(
-                        "Decompressing part \(partNum) using decompressChunkAndWriteSparse")
+                    // Check if this chunk might be all zeros (sparse data) by sampling the compressed data
+                    // Skip this check for now as it's an optimization we can add later if needed
+                    let isLikelySparse = false
 
-                    let decompressedBytesWritten = try decompressChunkAndWriteSparse(
-                        inputPath: partURL.path,
-                        outputHandle: outputHandle,
-                        startOffset: currentOffset
-                    )
-                    currentOffset += decompressedBytesWritten
-                    reassemblyProgressLogger.logProgress(
-                        current: Double(currentOffset) / Double(sizeForTruncate), // Use sizeForTruncate
-                        context: "Reassembling")
-
-                    // Remove the old block that checked getDecompressionCommand and did direct copy
-                    /*
-                    if let decompressCmd = getDecompressionCommand(for: layerMediaType) {  // Use extracted mediaType
-                        // ... [removed decompression logic using external tool] ...
+                    // Always attempt decompression using decompressChunkAndWriteSparse for LZ4 parts
+                    if isLikelySparse {
+                        // For sparse chunks, we don't need to write anything - just advance the offset
+                        // We determine the uncompressed size from the chunk metadata or estimation
+                        
+                        // For now, we'll still decompress to ensure correct behavior, and optimize later
+                        Logger.info("Chunk appears to be sparse, but decompressing for reliability")
+                        let decompressedBytesWritten = try decompressChunkAndWriteSparse(
+                            inputPath: partURL.path,
+                            outputHandle: outputHandle,
+                            startOffset: currentOffset
+                        )
+                        currentOffset += decompressedBytesWritten
                     } else {
-                        // No decompression command available, try direct copy
-                        // ... [removed direct copy logic] ...
+                        Logger.info("Decompressing part \(partNum)")
+                        let decompressedBytesWritten = try decompressChunkAndWriteSparse(
+                            inputPath: partURL.path,
+                            outputHandle: outputHandle,
+                            startOffset: currentOffset
+                        )
+                        currentOffset += decompressedBytesWritten
                     }
-                    */
+                    
+                    reassemblyProgressLogger.logProgress(
+                        current: Double(currentOffset) / Double(sizeForTruncate),
+                        context: "Reassembling"
+                    )
 
-                    // Ensure data is written before processing next part (optional but safer)
+                    // Ensure data is written before processing next part
                     try outputHandle.synchronize()
                 }
 
@@ -1147,16 +1125,53 @@ class ImageContainerRegistry: @unchecked Sendable {
                 reassemblyProgressLogger.logProgress(current: 1.0, context: "Reassembly Complete")
                 Logger.info("")  // Newline
 
-                // Ensure output handle is closed before post-processing
-                try outputHandle.close()
-
+                // Optimize sparseness after completing reassembly
+                try outputHandle.close() // Close handle to ensure all data is flushed
+                
                 // Verify final size
                 let finalSize =
                     (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size]
                         as? UInt64) ?? 0
                 Logger.info(
-                    "Final disk image size from cache (before sparse file optimization): \(ByteCountFormatter.string(fromByteCount: Int64(finalSize), countStyle: .file))"
+                    "Final disk image size: \(ByteCountFormatter.string(fromByteCount: Int64(finalSize), countStyle: .file))"
                 )
+
+                // Optimize sparseness if on macOS
+                if FileManager.default.fileExists(atPath: "/bin/cp") {
+                    Logger.info("Optimizing sparse file representation...")
+                    let optimizedPath = outputURL.path + ".optimized"
+                    
+                    let process = Process()
+                    process.executableURL = URL(fileURLWithPath: "/bin/cp")
+                    process.arguments = ["-c", outputURL.path, optimizedPath]
+                    
+                    do {
+                        try process.run()
+                        process.waitUntilExit()
+                        
+                        if process.terminationStatus == 0 {
+                            // Get size of optimized file
+                            let optimizedSize = (try? FileManager.default.attributesOfItem(atPath: optimizedPath)[.size] as? UInt64) ?? 0
+                            let originalUsage = getActualDiskUsage(path: outputURL.path)
+                            let optimizedUsage = getActualDiskUsage(path: optimizedPath)
+                            
+                            Logger.info(
+                                "Sparse optimization results: Before: \(ByteCountFormatter.string(fromByteCount: Int64(originalUsage), countStyle: .file)) actual usage, After: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedUsage), countStyle: .file)) actual usage (Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedSize), countStyle: .file)))"
+                            )
+                            
+                            // Replace the original with the optimized version
+                            try FileManager.default.removeItem(at: outputURL)
+                            try FileManager.default.moveItem(at: URL(fileURLWithPath: optimizedPath), to: outputURL)
+                            Logger.info("Replaced with optimized sparse version")
+                        } else {
+                            Logger.info("Sparse optimization failed, using original file")
+                            try? FileManager.default.removeItem(atPath: optimizedPath)
+                        }
+                    } catch {
+                        Logger.info("Error during sparse optimization: \(error.localizedDescription)")
+                        try? FileManager.default.removeItem(atPath: optimizedPath)
+                    }
+                }
 
                 if finalSize != sizeForTruncate {
                     Logger.info(
@@ -2468,26 +2483,117 @@ class ImageContainerRegistry: @unchecked Sendable {
                 let reassemblyDir = workDir.appendingPathComponent("reassembly")
                 try FileManager.default.createDirectory(at: reassemblyDir, withIntermediateDirectories: true)
                 let reassembledFile = reassemblyDir.appendingPathComponent("reassembled_disk.img")
+                
+                // Pre-allocate a sparse file with the correct size
                 Logger.info("Pre-allocating sparse file of \(ByteCountFormatter.string(fromByteCount: Int64(actualDiskSize), countStyle: .file))...")
-                if FileManager.default.fileExists(atPath: reassembledFile.path) { try FileManager.default.removeItem(at: reassembledFile) }
-                guard FileManager.default.createFile(atPath: reassembledFile.path, contents: nil) else { throw PushError.invalidURL }
+                if FileManager.default.fileExists(atPath: reassembledFile.path) {
+                    try FileManager.default.removeItem(at: reassembledFile)
+                }
+                guard FileManager.default.createFile(atPath: reassembledFile.path, contents: nil) else {
+                    throw PushError.fileCreationFailed(reassembledFile.path)
+                }
+                
                 let outputHandle = try FileHandle(forWritingTo: reassembledFile)
                 defer { try? outputHandle.close() }
+                
+                // Set the file size without writing data (creates a sparse file)
                 try outputHandle.truncate(atOffset: actualDiskSize)
+                
+                // Add test patterns at start and end to verify writability
+                let testPattern = "LUME_TEST_PATTERN".data(using: .utf8)!
+                try outputHandle.seek(toOffset: 0)
+                try outputHandle.write(contentsOf: testPattern)
+                try outputHandle.seek(toOffset: actualDiskSize - UInt64(testPattern.count))
+                try outputHandle.write(contentsOf: testPattern)
+                try outputHandle.synchronize()
+                
+                Logger.info("Test patterns written to sparse file. File is ready for writing.")
+                
+                // Track reassembly progress
+                var reassemblyProgressLogger = ProgressLogger(threshold: 0.05)
                 var currentOffset: UInt64 = 0
-                for (index, cachedChunkPath, _) in diskChunks {
+                
+                // Process each chunk in order
+                for (index, cachedChunkPath, _) in diskChunks.sorted(by: { $0.index < $1.index }) {
                     Logger.info("Decompressing & writing part \(index + 1)/\(diskChunks.count): \(cachedChunkPath.lastPathComponent) at offset \(currentOffset)...")
-                    let decompressedBytesWritten = try decompressChunkAndWriteSparse(inputPath: cachedChunkPath.path, outputHandle: outputHandle, startOffset: currentOffset)
+                    
+                    // Always seek to the correct position
+                    try outputHandle.seek(toOffset: currentOffset)
+                    
+                    // Decompress and write the chunk
+                    let decompressedBytesWritten = try decompressChunkAndWriteSparse(
+                        inputPath: cachedChunkPath.path,
+                        outputHandle: outputHandle,
+                        startOffset: currentOffset
+                    )
+                    
                     currentOffset += decompressedBytesWritten
+                    reassemblyProgressLogger.logProgress(
+                        current: Double(currentOffset) / Double(actualDiskSize),
+                        context: "Reassembling"
+                    )
+                    
+                    // Ensure data is written before processing next part
+                    try outputHandle.synchronize()
                 }
+                
+                // Finalize progress
+                reassemblyProgressLogger.logProgress(current: 1.0, context: "Reassembly Complete")
+                Logger.info("")  // Newline
+                
+                // Close handle before post-processing
+                try outputHandle.close()
+                
+                // Optimize sparseness if on macOS
+                let optimizedFile = reassemblyDir.appendingPathComponent("optimized_disk.img")
+                if FileManager.default.fileExists(atPath: "/bin/cp") {
+                    Logger.info("Optimizing sparse file representation...")
+                    
+                    let process = Process()
+                    process.executableURL = URL(fileURLWithPath: "/bin/cp")
+                    process.arguments = ["-c", reassembledFile.path, optimizedFile.path]
+                    
+                    do {
+                        try process.run()
+                        process.waitUntilExit()
+                        
+                        if process.terminationStatus == 0 {
+                            // Get sizes of original and optimized files
+                            let optimizedSize = (try? FileManager.default.attributesOfItem(atPath: optimizedFile.path)[.size] as? UInt64) ?? 0
+                            let originalUsage = getActualDiskUsage(path: reassembledFile.path)
+                            let optimizedUsage = getActualDiskUsage(path: optimizedFile.path)
+                            
+                            Logger.info(
+                                "Sparse optimization results: Before: \(ByteCountFormatter.string(fromByteCount: Int64(originalUsage), countStyle: .file)) actual usage, After: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedUsage), countStyle: .file)) actual usage (Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedSize), countStyle: .file)))"
+                            )
+                            
+                            // Replace original with optimized version
+                            try FileManager.default.removeItem(at: reassembledFile)
+                            try FileManager.default.moveItem(at: optimizedFile, to: reassembledFile)
+                            Logger.info("Using sparse-optimized file for verification")
+                        } else {
+                            Logger.info("Sparse optimization failed, using original file for verification")
+                            try? FileManager.default.removeItem(at: optimizedFile)
+                        }
+                    } catch {
+                        Logger.info("Error during sparse optimization: \(error.localizedDescription)")
+                        try? FileManager.default.removeItem(at: optimizedFile)
+                    }
+                }
+                
+                // Verification step
                 Logger.info("Verifying reassembled file...")
                 let originalSize = diskSize
                 let originalDigest = calculateSHA256(filePath: diskPath.path)
                 let reassembledAttributes = try FileManager.default.attributesOfItem(atPath: reassembledFile.path)
                 let reassembledSize = reassembledAttributes[.size] as? UInt64 ?? 0
                 let reassembledDigest = calculateSHA256(filePath: reassembledFile.path)
+                
+                // Check actual disk usage
                 let originalActualSize = getActualDiskUsage(path: diskPath.path)
                 let reassembledActualSize = getActualDiskUsage(path: reassembledFile.path)
+                
+                // Report results
                 Logger.info("Results:")
                 Logger.info("  Original size: \(ByteCountFormatter.string(fromByteCount: Int64(originalSize), countStyle: .file)) (\(originalSize) bytes)")
                 Logger.info("  Reassembled size: \(ByteCountFormatter.string(fromByteCount: Int64(reassembledSize), countStyle: .file)) (\(reassembledSize) bytes)")
@@ -2495,9 +2601,84 @@ class ImageContainerRegistry: @unchecked Sendable {
                 Logger.info("  Reassembled digest: \(reassembledDigest)")
                 Logger.info("  Original: Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(originalSize), countStyle: .file)), Actual disk usage: \(ByteCountFormatter.string(fromByteCount: Int64(originalActualSize), countStyle: .file))")
                 Logger.info("  Reassembled: Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(reassembledSize), countStyle: .file)), Actual disk usage: \(ByteCountFormatter.string(fromByteCount: Int64(reassembledActualSize), countStyle: .file))")
-                if originalDigest == reassembledDigest { Logger.info("✅ VERIFICATION SUCCESSFUL: Files are identical") } else { Logger.info("❌ VERIFICATION FAILED: Files differ"); if originalSize != reassembledSize { Logger.info("  Size mismatch: Original \(originalSize) bytes, Reassembled \(reassembledSize) bytes") }; Logger.info("Attempting to identify differences..."); Logger.info("NOTE: This might be a sparse file issue. The content may be identical, but sparse regions"); Logger.info("      may be handled differently between the original and reassembled files."); if originalActualSize > 0 { let diffPercentage = ((Double(reassembledActualSize) - Double(originalActualSize)) / Double(originalActualSize)) * 100.0; Logger.info("  Disk usage difference: \(String(format: "%.2f", diffPercentage))%"); if diffPercentage < -40 { Logger.info("  ⚠️ WARNING: Reassembled disk uses significantly less space (>40% difference)."); Logger.info("  This indicates sparse regions weren't properly preserved and may affect VM functionality.") } else if diffPercentage < -10 { Logger.info("  ⚠️ WARNING: Reassembled disk uses less space (10-40% difference)."); Logger.info("  Some sparse regions may not be properly preserved but VM might still function correctly.") } else if diffPercentage > 10 { Logger.info("  ⚠️ WARNING: Reassembled disk uses more space (>10% difference)."); Logger.info("  This is unusual and may indicate improper sparse file handling.") } else { Logger.info("  ✓ Disk usage difference is minimal (<10%). VM likely to function correctly.") } } }
+                
+                // Determine if verification was successful
+                if originalDigest == reassembledDigest {
+                    Logger.info("✅ VERIFICATION SUCCESSFUL: Files are identical")
+                } else {
+                    Logger.info("❌ VERIFICATION FAILED: Files differ")
+                    
+                    if originalSize != reassembledSize {
+                        Logger.info("  Size mismatch: Original \(originalSize) bytes, Reassembled \(reassembledSize) bytes")
+                    }
+                    
+                    // Check sparse file characteristics
+                    Logger.info("Attempting to identify differences...")
+                    Logger.info("NOTE: This might be a sparse file issue. The content may be identical, but sparse regions")
+                    Logger.info("      may be handled differently between the original and reassembled files.")
+                    
+                    if originalActualSize > 0 {
+                        let diffPercentage = ((Double(reassembledActualSize) - Double(originalActualSize)) / Double(originalActualSize)) * 100.0
+                        Logger.info("  Disk usage difference: \(String(format: "%.2f", diffPercentage))%")
+                        
+                        if diffPercentage < -40 {
+                            Logger.info("  ⚠️ WARNING: Reassembled disk uses significantly less space (>40% difference).")
+                            Logger.info("  This indicates sparse regions weren't properly preserved and may affect VM functionality.")
+                        } else if diffPercentage < -10 {
+                            Logger.info("  ⚠️ WARNING: Reassembled disk uses less space (10-40% difference).")
+                            Logger.info("  Some sparse regions may not be properly preserved but VM might still function correctly.")
+                        } else if diffPercentage > 10 {
+                            Logger.info("  ⚠️ WARNING: Reassembled disk uses more space (>10% difference).")
+                            Logger.info("  This is unusual and may indicate improper sparse file handling.")
+                        } else {
+                            Logger.info("  ✓ Disk usage difference is minimal (<10%). VM likely to function correctly.")
+                        }
+                    }
+                    
+                    // Offer recovery option
+                    if originalDigest != reassembledDigest {
+                        Logger.info("")
+                        Logger.info("===== ATTEMPTING RECOVERY ACTION =====")
+                        Logger.info("Since verification failed, trying direct copy as a fallback method.")
+                        
+                        let fallbackFile = reassemblyDir.appendingPathComponent("fallback_disk.img")
+                        Logger.info("Creating fallback disk image at: \(fallbackFile.path)")
+                        
+                        // Try rsync first
+                        let rsyncProcess = Process()
+                        rsyncProcess.executableURL = URL(fileURLWithPath: "/usr/bin/rsync")
+                        rsyncProcess.arguments = ["-aS", "--progress", diskPath.path, fallbackFile.path]
+                        
+                        do {
+                            try rsyncProcess.run()
+                            rsyncProcess.waitUntilExit()
+                            
+                            if rsyncProcess.terminationStatus == 0 {
+                                Logger.info("Direct copy completed with rsync. Fallback image available at: \(fallbackFile.path)")
+                            } else {
+                                // Try cp -c as fallback
+                                Logger.info("Rsync failed. Attempting with cp -c command...")
+                                let cpProcess = Process()
+                                cpProcess.executableURL = URL(fileURLWithPath: "/bin/cp")
+                                cpProcess.arguments = ["-c", diskPath.path, fallbackFile.path]
+                                
+                                try cpProcess.run()
+                                cpProcess.waitUntilExit()
+                                
+                                if cpProcess.terminationStatus == 0 {
+                                    Logger.info("Direct copy completed with cp -c. Fallback image available at: \(fallbackFile.path)")
+                                } else {
+                                    Logger.info("All recovery attempts failed.")
+                                }
+                            }
+                        } catch {
+                            Logger.info("Error during recovery attempts: \(error.localizedDescription)")
+                            Logger.info("All recovery attempts failed.")
+                        }
+                    }
+                }
+                
                 Logger.info("Reassembled file is available at: \(reassembledFile.path)")
-                 if originalDigest != reassembledDigest { Logger.info(""); Logger.info("===== ATTEMPTING RECOVERY ACTION ====="); Logger.info("Since verification failed, trying direct copy as a fallback method."); let fallbackFile = reassemblyDir.appendingPathComponent("fallback_disk.img"); Logger.info("Creating fallback disk image at: \(fallbackFile.path)"); let rsyncProcess = Process(); rsyncProcess.executableURL = URL(fileURLWithPath: "/usr/bin/rsync"); rsyncProcess.arguments = ["-aS", "--progress", diskPath.path, fallbackFile.path]; try rsyncProcess.run(); rsyncProcess.waitUntilExit(); if rsyncProcess.terminationStatus == 0 { Logger.info("Direct copy completed. You may want to try using this fallback disk image"); Logger.info("instead if the reassembled one has issues: \(fallbackFile.path)") } else { Logger.info("Direct copy failed. Attempting with cp -c command..."); let cpProcess = Process(); cpProcess.executableURL = URL(fileURLWithPath: "/bin/cp"); cpProcess.arguments = ["-c", diskPath.path, fallbackFile.path]; try cpProcess.run(); cpProcess.waitUntilExit(); if cpProcess.terminationStatus == 0 { Logger.info("Direct copy completed with cp -c. Fallback image available at: \(fallbackFile.path)") } else { Logger.info("All recovery attempts failed.") } } }
             }
         }
 
