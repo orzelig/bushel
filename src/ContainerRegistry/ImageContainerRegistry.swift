@@ -1203,6 +1203,11 @@ class ImageContainerRegistry: @unchecked Sendable {
             }
         }
 
+        // Simulate cache pull behavior if this is a first pull
+        if !cachingEnabled || !validateCache(manifest: manifest, manifestId: manifestId) {
+            try simulateCachePull(tempVMDir: tempVMDir)
+        }
+
         // Only move to final location once everything is complete
         if FileManager.default.fileExists(atPath: vmDir.dir.path) {
             try FileManager.default.removeItem(at: URL(fileURLWithPath: vmDir.dir.path))
@@ -1223,64 +1228,6 @@ class ImageContainerRegistry: @unchecked Sendable {
 
         // Move files to final location
         try FileManager.default.moveItem(at: tempVMDir, to: URL(fileURLWithPath: vmDir.dir.path))
-
-        // Apply proper ownership and permissions to ensure VM can start
-        Logger.info("Setting proper file permissions and ownership...")
-        let chmodProcess = Process()
-        chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
-        chmodProcess.arguments = ["-R", "u+rw", vmDir.dir.path]
-        try chmodProcess.run()
-        chmodProcess.waitUntilExit()
-        
-        // Ensure disk image has proper permissions
-        let diskImgPath = URL(fileURLWithPath: vmDir.dir.path).appendingPathComponent("disk.img").path
-        if FileManager.default.fileExists(atPath: diskImgPath) {
-            let diskChmodProcess = Process()
-            diskChmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
-            diskChmodProcess.arguments = ["0644", diskImgPath]
-            try diskChmodProcess.run()
-            diskChmodProcess.waitUntilExit()
-            
-            Logger.info("Applied file permissions to disk image")
-            
-            // Ensure disk image is properly synchronized to disk
-            Logger.info("Ensuring disk image is properly synchronized to disk...")
-            let syncProcess = Process()
-            syncProcess.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
-            syncProcess.arguments = ["apfs", "resetFusionStats"]  // This forces disk cache flush
-            try? syncProcess.run()
-            syncProcess.waitUntilExit()
-            
-            // Alternative sync method if needed
-            let syncProcess2 = Process()
-            syncProcess2.executableURL = URL(fileURLWithPath: "/bin/sync")
-            try? syncProcess2.run()
-            syncProcess2.waitUntilExit()
-            
-            Logger.info("Disk image sync complete")
-            
-            // Verify the disk image is readable
-            Logger.info("Verifying disk image integrity...")
-            let fileHandle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: diskImgPath))
-            if let handle = fileHandle {
-                // Try to read the first 512 bytes (boot sector)
-                if let data = try? handle.read(upToCount: 512), data.count == 512 {
-                    Logger.info("Disk image verification: Successfully read first 512 bytes")
-                    
-                    // Check for boot signature (0x55AA at the end of the boot sector)
-                    if data.count >= 512 && data[510] == 0x55 && data[511] == 0xAA {
-                        Logger.info("Disk image verification: Boot signature valid (0x55AA)")
-                    } else {
-                        Logger.info("Disk image verification: No valid boot signature found")
-                    }
-                } else {
-                    Logger.error("Disk image verification: Failed to read first 512 bytes")
-                }
-                try? handle.close()
-            } else {
-                Logger.error("Disk image verification: Failed to open file for reading")
-            }
-        }
 
         Logger.info("Download complete: Files extracted to \(vmDir.dir.path)")
         Logger.info(
@@ -1541,6 +1488,168 @@ class ImageContainerRegistry: @unchecked Sendable {
         }
 
         Logger.info("Cache copy complete")
+    }
+
+    // Function to simulate cache pull behavior for freshly downloaded images
+    private func simulateCachePull(tempVMDir: URL) throws {
+        Logger.info("Simulating cache pull behavior for freshly downloaded image...")
+        
+        // 1. Find disk.img in tempVMDir
+        let diskImgPath = tempVMDir.appendingPathComponent("disk.img")
+        guard FileManager.default.fileExists(atPath: diskImgPath.path) else {
+            Logger.info("No disk.img found to simulate cache pull behavior")
+            return
+        }
+        
+        // 2. Create a temporary directory for the simulation
+        let simCacheDir = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "lume_simcache_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: simCacheDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: simCacheDir)
+        }
+        
+        // 3. Copy the disk.img to the simulation directory
+        let cachedDiskPath = simCacheDir.appendingPathComponent("cached_disk.img")
+        try FileManager.default.copyItem(at: diskImgPath, to: cachedDiskPath)
+        
+        // 4. Delete original disk.img (will be replaced by the simulated cache pull)
+        try FileManager.default.removeItem(at: diskImgPath)
+        
+        // 5. Get disk size which will be needed for the sparse file
+        var diskSize: UInt64 = 0
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: cachedDiskPath.path),
+           let size = attributes[.size] as? UInt64 {
+            diskSize = size
+        } else {
+            // If size can't be determined, read config.json
+            let configPath = tempVMDir.appendingPathComponent("config.json")
+            if let configDiskSize = getUncompressedSizeFromConfig(configPath: configPath) {
+                diskSize = configDiskSize
+            } else {
+                // Try to get from VM config
+                if FileManager.default.fileExists(atPath: configPath.path) {
+                    do {
+                        let configData = try Data(contentsOf: configPath)
+                        if let vmConfig = try? JSONDecoder().decode(VMConfig.self, from: configData),
+                           let size = vmConfig.diskSize {
+                            diskSize = size
+                        }
+                    } catch {
+                        Logger.error("Failed to read config for disk size: \(error)")
+                    }
+                }
+            }
+        }
+        
+        // Fallback if no size could be determined
+        if diskSize == 0 {
+            diskSize = 10 * 1024 * 1024 * 1024 // 10GB default
+            Logger.error("Could not determine disk size, using default: \(diskSize) bytes")
+        }
+        
+        // 6. Create the sparse file with proper size
+        guard FileManager.default.createFile(atPath: diskImgPath.path, contents: nil) else {
+            throw PullError.fileCreationFailed(diskImgPath.path)
+        }
+        
+        let outputHandle = try FileHandle(forWritingTo: diskImgPath)
+        defer { try? outputHandle.close() }
+        
+        // Set the file size (creates sparse file)
+        try outputHandle.truncate(atOffset: diskSize)
+        Logger.info("Sparse file initialized for simulated cache pull with size: \(ByteCountFormatter.string(fromByteCount: Int64(diskSize), countStyle: .file))")
+        
+        // 7. Add test patterns at beginning and end
+        let testPattern = "LUME_TEST_PATTERN".data(using: .utf8)!
+        try outputHandle.seek(toOffset: 0)
+        try outputHandle.write(contentsOf: testPattern)
+        try outputHandle.seek(toOffset: diskSize - UInt64(testPattern.count))
+        try outputHandle.write(contentsOf: testPattern)
+        try outputHandle.synchronize()
+        
+        // 8. Copy data from the cached file
+        let sourceHandle = try FileHandle(forReadingFrom: cachedDiskPath)
+        defer { try? sourceHandle.close() }
+        
+        // Copy in 50MB chunks to maintain sparse files
+        let chunkSize = 50 * 1024 * 1024
+        var currentOffset: UInt64 = 0
+        var progressLogger = ProgressLogger(threshold: 0.05)
+        
+        while currentOffset < diskSize {
+            try sourceHandle.seek(toOffset: currentOffset)
+            if let chunkData = try sourceHandle.read(upToCount: chunkSize) {
+                if chunkData.isEmpty { break }
+                
+                try outputHandle.seek(toOffset: currentOffset)
+                try outputHandle.write(contentsOf: chunkData)
+                currentOffset += UInt64(chunkData.count)
+                
+                progressLogger.logProgress(
+                    current: Double(currentOffset) / Double(diskSize),
+                    context: "Simulating Cache Pull"
+                )
+            } else {
+                break
+            }
+        }
+        
+        try outputHandle.synchronize()
+        try outputHandle.close() // Close explicitly before optimizing
+        
+        // 9. Optimize the sparse file with cp -c (same as in copyFromCache)
+        if FileManager.default.fileExists(atPath: "/bin/cp") {
+            Logger.info("Optimizing sparse file representation for simulated cache pull...")
+            let optimizedPath = diskImgPath.path + ".optimized"
+            
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/cp")
+            process.arguments = ["-c", diskImgPath.path, optimizedPath]
+            
+            do {
+                try process.run()
+                process.waitUntilExit()
+                
+                if process.terminationStatus == 0 {
+                    // Get size of optimized file
+                    let optimizedSize = (try? FileManager.default.attributesOfItem(atPath: optimizedPath)[.size] as? UInt64) ?? 0
+                    let originalUsage = getActualDiskUsage(path: diskImgPath.path)
+                    let optimizedUsage = getActualDiskUsage(path: optimizedPath)
+                    
+                    Logger.info(
+                        "Sparse optimization results for simulated cache: Before: \(ByteCountFormatter.string(fromByteCount: Int64(originalUsage), countStyle: .file)) actual usage, After: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedUsage), countStyle: .file)) actual usage (Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedSize), countStyle: .file)))"
+                    )
+                    
+                    // Replace the original with the optimized version
+                    try FileManager.default.removeItem(at: diskImgPath)
+                    try FileManager.default.moveItem(at: URL(fileURLWithPath: optimizedPath), to: diskImgPath)
+                    Logger.info("Replaced with optimized sparse version for simulated cache")
+                } else {
+                    Logger.info("Sparse optimization failed for simulated cache, using original file")
+                    try? FileManager.default.removeItem(atPath: optimizedPath)
+                }
+            } catch {
+                Logger.info("Error during sparse optimization for simulated cache: \(error.localizedDescription)")
+                try? FileManager.default.removeItem(atPath: optimizedPath)
+            }
+        }
+        
+        // 10. Ensure disk image is properly synchronized to disk
+        Logger.info("Ensuring disk image is properly synchronized for simulated cache...")
+        let syncProcess = Process()
+        syncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
+        try? syncProcess.run()
+        syncProcess.waitUntilExit()
+        
+        // Set proper permissions on the disk image
+        let chmodProcess = Process()
+        chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        chmodProcess.arguments = ["0644", diskImgPath.path]
+        try chmodProcess.run()
+        chmodProcess.waitUntilExit()
+        
+        Logger.info("Simulated cache pull completed successfully")
     }
 
     private func getToken(repository: String) async throws -> String {
