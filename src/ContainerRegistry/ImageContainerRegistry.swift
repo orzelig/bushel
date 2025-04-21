@@ -1526,11 +1526,13 @@ class ImageContainerRegistry: @unchecked Sendable {
         try outputHandle.truncate(atOffset: diskSize)
         
         // 6. Write test patterns at beginning and end
+        Logger.info("Writing test patterns to verify writability...")
         let testPattern = "LUME_TEST_PATTERN".data(using: .utf8)!
         try outputHandle.seek(toOffset: 0)
         try outputHandle.write(contentsOf: testPattern)
         try outputHandle.seek(toOffset: diskSize - UInt64(testPattern.count))
         try outputHandle.write(contentsOf: testPattern)
+        try outputHandle.synchronize()
         
         // 7. Decompress the original data at offset 0
         Logger.info("Decompressing original disk image with same mechanism as cache pull...")
@@ -1542,8 +1544,10 @@ class ImageContainerRegistry: @unchecked Sendable {
         
         Logger.info("Decompressed \(ByteCountFormatter.string(fromByteCount: Int64(bytesWritten), countStyle: .file)) of disk image data")
         
-        // 8. Ensure all data is written to disk
+        // 8. Ensure all data is written to disk with an explicit sync
         try outputHandle.synchronize()
+        
+        // Very important: close the handle before optimization
         try outputHandle.close()
         
         // 9. Optimize sparse file with cp -c (exactly matching cache pull process)
@@ -1568,6 +1572,13 @@ class ImageContainerRegistry: @unchecked Sendable {
                         "Sparse optimization results: Before: \(ByteCountFormatter.string(fromByteCount: Int64(originalUsage), countStyle: .file)) actual usage, After: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedUsage), countStyle: .file)) actual usage (Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedSize), countStyle: .file)))"
                     )
                     
+                    // Before replacing the file, make sure to synchronize the filesystem
+                    let syncBeforeReplace = Process()
+                    syncBeforeReplace.executableURL = URL(fileURLWithPath: "/bin/sync")
+                    try syncBeforeReplace.run()
+                    syncBeforeReplace.waitUntilExit()
+                    
+                    // Now replace the original with the optimized version
                     try FileManager.default.removeItem(at: diskImgPath)
                     try FileManager.default.moveItem(at: URL(fileURLWithPath: optimizedPath), to: diskImgPath)
                     Logger.info("Replaced with optimized sparse version")
