@@ -1432,6 +1432,43 @@ class ImageContainerRegistry: @unchecked Sendable {
             }
 
             Logger.info("Disk image reassembly completed")
+            
+            // Optimize sparseness for cached reassembly if on macOS
+            if FileManager.default.fileExists(atPath: "/bin/cp") {
+                Logger.info("Optimizing sparse file representation for cached reassembly...")
+                let optimizedPath = outputURL.path + ".optimized"
+                
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/bin/cp")
+                process.arguments = ["-c", outputURL.path, optimizedPath]
+                
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    
+                    if process.terminationStatus == 0 {
+                        // Get size of optimized file
+                        let optimizedSize = (try? FileManager.default.attributesOfItem(atPath: optimizedPath)[.size] as? UInt64) ?? 0
+                        let originalUsage = getActualDiskUsage(path: outputURL.path)
+                        let optimizedUsage = getActualDiskUsage(path: optimizedPath)
+                        
+                        Logger.info(
+                            "Sparse optimization results for cache: Before: \(ByteCountFormatter.string(fromByteCount: Int64(originalUsage), countStyle: .file)) actual usage, After: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedUsage), countStyle: .file)) actual usage (Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedSize), countStyle: .file)))"
+                        )
+                        
+                        // Replace the original with the optimized version
+                        try FileManager.default.removeItem(at: outputURL)
+                        try FileManager.default.moveItem(at: URL(fileURLWithPath: optimizedPath), to: outputURL)
+                        Logger.info("Replaced cached reassembly with optimized sparse version")
+                    } else {
+                        Logger.info("Sparse optimization failed for cache, using original file")
+                        try? FileManager.default.removeItem(atPath: optimizedPath)
+                    }
+                } catch {
+                    Logger.info("Error during sparse optimization for cache: \(error.localizedDescription)")
+                    try? FileManager.default.removeItem(atPath: optimizedPath)
+                }
+            }
         }
 
         Logger.info("Cache copy complete")
