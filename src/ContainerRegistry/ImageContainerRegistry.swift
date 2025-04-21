@@ -1521,6 +1521,12 @@ class ImageContainerRegistry: @unchecked Sendable {
             throw PullError.fileCreationFailed(diskImgPath.path)
         }
         
+        // Run an initial filesystem sync
+        let initialSyncProcess = Process()
+        initialSyncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
+        try initialSyncProcess.run()
+        initialSyncProcess.waitUntilExit()
+        
         // IMPORTANT: Use autoreleasepool to ensure file handle is released promptly
         try autoreleasepool {
             // 5. Set up file handle and create sparse file
@@ -1534,6 +1540,8 @@ class ImageContainerRegistry: @unchecked Sendable {
             try outputHandle.write(contentsOf: testPattern)
             try outputHandle.seek(toOffset: diskSize - UInt64(testPattern.count))
             try outputHandle.write(contentsOf: testPattern)
+            
+            // Make sure test patterns are synced to disk first
             try outputHandle.synchronize()
             
             // 7. Decompress the original data at offset 0
@@ -1546,16 +1554,30 @@ class ImageContainerRegistry: @unchecked Sendable {
             
             Logger.info("Decompressed \(ByteCountFormatter.string(fromByteCount: Int64(bytesWritten), countStyle: .file)) of disk image data")
             
-            // 8. Ensure all data is written to disk with an explicit sync
+            // 8. Ensure all data is written to disk with multiple explicit syncs
             try outputHandle.synchronize()
+            
+            // Force an fsync using lower-level API for the file descriptor
+            let fd = outputHandle.fileDescriptor
+            if fd >= 0 {
+                fsync(fd)
+                Logger.info("Performed low-level fsync on file descriptor")
+            }
             
             // Very important: explicitly close the handle here inside the autorelease pool
             try outputHandle.close()
             Logger.info("File handle explicitly closed after decompression and synchronization")
         }
         
-        // Wait a moment for file system operations to complete
-        Thread.sleep(forTimeInterval: 0.5)
+        // Perform an explicit filesystem sync after closing the file handle
+        let postCloseSyncProcess = Process()
+        postCloseSyncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
+        try postCloseSyncProcess.run()
+        postCloseSyncProcess.waitUntilExit()
+        
+        // Wait longer to ensure all filesystem operations are complete
+        Logger.info("Waiting for filesystem operations to complete...")
+        Thread.sleep(forTimeInterval: 1.0)
         
         // 9. Optimize sparse file with cp -c (exactly matching cache pull process)
         if FileManager.default.fileExists(atPath: "/bin/cp") {
@@ -1595,6 +1617,12 @@ class ImageContainerRegistry: @unchecked Sendable {
                     try FileManager.default.removeItem(at: diskImgPath)
                     try FileManager.default.moveItem(at: URL(fileURLWithPath: optimizedPath), to: diskImgPath)
                     Logger.info("Replaced with optimized sparse version")
+                    
+                    // Additional sync after replacement
+                    let syncAfterReplace = Process()
+                    syncAfterReplace.executableURL = URL(fileURLWithPath: "/bin/sync")
+                    try syncAfterReplace.run()
+                    syncAfterReplace.waitUntilExit()
                 } else {
                     Logger.info("Sparse optimization failed, using original file")
                     try? FileManager.default.removeItem(atPath: optimizedPath)
@@ -1617,6 +1645,15 @@ class ImageContainerRegistry: @unchecked Sendable {
         syncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
         try syncProcess.run()
         syncProcess.waitUntilExit()
+        
+        // One more filesystem sync for good measure
+        let finalSyncProcess = Process()
+        finalSyncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
+        try finalSyncProcess.run()
+        finalSyncProcess.waitUntilExit()
+        
+        // Wait a moment for final filesystem operations
+        Thread.sleep(forTimeInterval: 0.5)
         
         // 12. Clean up the backup file
         try FileManager.default.removeItem(at: backupPath)
