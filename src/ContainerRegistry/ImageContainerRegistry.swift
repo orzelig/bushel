@@ -1501,32 +1501,32 @@ class ImageContainerRegistry: @unchecked Sendable {
             return
         }
         
-        // Get the file size
+        // 2. Get disk size and other attributes
         let attributes = try FileManager.default.attributesOfItem(atPath: diskImgPath.path)
         guard let diskSize = attributes[.size] as? UInt64, diskSize > 0 else {
             Logger.error("Could not determine disk.img size for simulation")
             return
         }
         
-        // 2. Rename the original file to .original
-        let originalPath = tempVMDir.appendingPathComponent("disk.img.original")
-        try FileManager.default.moveItem(at: diskImgPath, to: originalPath)
+        // 3. Create backup of original
+        let backupPath = tempVMDir.appendingPathComponent("disk.img.original")
+        try FileManager.default.moveItem(at: diskImgPath, to: backupPath)
         
-        // 3. Create a new empty file with the same name
+        Logger.info("Creating sparse file with size: \(ByteCountFormatter.string(fromByteCount: Int64(diskSize), countStyle: .file))")
+        
+        // 4. Create empty sparse file
         guard FileManager.default.createFile(atPath: diskImgPath.path, contents: nil) else {
             // If creation fails, restore the original
-            try? FileManager.default.moveItem(at: originalPath, to: diskImgPath)
+            try? FileManager.default.moveItem(at: backupPath, to: diskImgPath)
             throw PullError.fileCreationFailed(diskImgPath.path)
         }
         
-        // 4. Open a file handle for writing to the new file
+        // 5. Open the file and truncate to desired size (creates sparse file)
         let outputHandle = try FileHandle(forWritingTo: diskImgPath)
-        
-        // 5. Set the total size (creates a sparse file)
         try outputHandle.truncate(atOffset: diskSize)
-        Logger.info("Created sparse file with size: \(ByteCountFormatter.string(fromByteCount: Int64(diskSize), countStyle: .file))")
         
-        // 6. Add test patterns at beginning and end (same as in copyFromCache)
+        // 6. Add test patterns at beginning and end exactly as in copyFromCache
+        Logger.info("Writing test patterns to verify writability...")
         let testPattern = "LUME_TEST_PATTERN".data(using: .utf8)!
         try outputHandle.seek(toOffset: 0)
         try outputHandle.write(contentsOf: testPattern)
@@ -1534,24 +1534,24 @@ class ImageContainerRegistry: @unchecked Sendable {
         try outputHandle.write(contentsOf: testPattern)
         try outputHandle.synchronize()
         
-        Logger.info("Test patterns written, starting decompression simulation...")
+        // 7. Now decompress the original disk image exactly as we would with cache parts
+        Logger.info("Processing disk image using the same mechanism as cache pull...")
         
-        // 7. Use decompressChunkAndWriteSparse - the EXACT same function used by copyFromCache
         let bytesWritten = try decompressChunkAndWriteSparse(
-            inputPath: originalPath.path,
+            inputPath: backupPath.path,
             outputHandle: outputHandle,
             startOffset: 0
         )
         
-        // 8. Make sure the file handle is properly synchronized before closing
+        Logger.info("Processed \(ByteCountFormatter.string(fromByteCount: Int64(bytesWritten), countStyle: .file)) of disk image data")
+        
+        // 8. Ensure all data is written to disk
         try outputHandle.synchronize()
         try outputHandle.close()
         
-        Logger.info("Decompressed \(ByteCountFormatter.string(fromByteCount: Int64(bytesWritten), countStyle: .file)) using the same method as cache pull")
-        
-        // 9. Use the same sparse file optimization as copyFromCache
+        // 9. Run sparse file optimization with cp -c exactly as in the cache pull process
         if FileManager.default.fileExists(atPath: "/bin/cp") {
-            Logger.info("Optimizing sparse file representation for simulated cache pull...")
+            Logger.info("Optimizing sparse file representation...")
             let optimizedPath = diskImgPath.path + ".optimized"
             
             let process = Process()
@@ -1571,7 +1571,6 @@ class ImageContainerRegistry: @unchecked Sendable {
                         "Sparse optimization results: Before: \(ByteCountFormatter.string(fromByteCount: Int64(originalUsage), countStyle: .file)) actual usage, After: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedUsage), countStyle: .file)) actual usage (Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedSize), countStyle: .file)))"
                     )
                     
-                    // Replace original with optimized
                     try FileManager.default.removeItem(at: diskImgPath)
                     try FileManager.default.moveItem(at: URL(fileURLWithPath: optimizedPath), to: diskImgPath)
                     Logger.info("Replaced with optimized sparse version")
@@ -1585,23 +1584,23 @@ class ImageContainerRegistry: @unchecked Sendable {
             }
         }
         
-        // 10. Set permissions and do final sync
+        // 10. Ensure file has correct permissions
         let chmodProcess = Process()
         chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
         chmodProcess.arguments = ["0644", diskImgPath.path]
         try chmodProcess.run()
         chmodProcess.waitUntilExit()
         
-        // Final sync
+        // 11. Final sync to ensure all data is on disk
         let syncProcess = Process()
         syncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
-        try? syncProcess.run()
+        try syncProcess.run()
         syncProcess.waitUntilExit()
         
-        // 11. Clean up
-        try? FileManager.default.removeItem(at: originalPath)
+        // 12. Clean up the backup file
+        try FileManager.default.removeItem(at: backupPath)
         
-        Logger.info("Simulated cache pull completed successfully")
+        Logger.info("Simulation of cache pull behavior completed")
     }
 
     private func getToken(repository: String) async throws -> String {
