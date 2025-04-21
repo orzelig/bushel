@@ -1501,55 +1501,53 @@ class ImageContainerRegistry: @unchecked Sendable {
             return
         }
         
-        // 2. Get disk size and other attributes
+        // 2. Get file size and other attributes
         let attributes = try FileManager.default.attributesOfItem(atPath: diskImgPath.path)
         guard let diskSize = attributes[.size] as? UInt64, diskSize > 0 else {
             Logger.error("Could not determine disk.img size for simulation")
             return
         }
         
-        // 3. Create backup of original
+        // 3. Rename the original file to backup
         let backupPath = tempVMDir.appendingPathComponent("disk.img.original")
         try FileManager.default.moveItem(at: diskImgPath, to: backupPath)
         
         Logger.info("Creating sparse file with size: \(ByteCountFormatter.string(fromByteCount: Int64(diskSize), countStyle: .file))")
         
-        // 4. Create empty sparse file
+        // 4. Create a new empty file
         guard FileManager.default.createFile(atPath: diskImgPath.path, contents: nil) else {
             // If creation fails, restore the original
             try? FileManager.default.moveItem(at: backupPath, to: diskImgPath)
             throw PullError.fileCreationFailed(diskImgPath.path)
         }
         
-        // 5. Open the file and truncate to desired size (creates sparse file)
+        // 5. Open the file handle and set size (creates sparse file)
         let outputHandle = try FileHandle(forWritingTo: diskImgPath)
         try outputHandle.truncate(atOffset: diskSize)
         
-        // 6. Add test patterns at beginning and end exactly as in copyFromCache
+        // 6. Add test patterns at beginning and end
         Logger.info("Writing test patterns to verify writability...")
         let testPattern = "LUME_TEST_PATTERN".data(using: .utf8)!
         try outputHandle.seek(toOffset: 0)
         try outputHandle.write(contentsOf: testPattern)
         try outputHandle.seek(toOffset: diskSize - UInt64(testPattern.count))
         try outputHandle.write(contentsOf: testPattern)
-        try outputHandle.synchronize()
         
-        // 7. Now decompress the original disk image exactly as we would with cache parts
-        Logger.info("Processing disk image using the same mechanism as cache pull...")
-        
+        // 7. Decompress the original disk image at offset 0
+        Logger.info("Decompressing original disk image at offset 0...")
         let bytesWritten = try decompressChunkAndWriteSparse(
             inputPath: backupPath.path,
             outputHandle: outputHandle,
             startOffset: 0
         )
         
-        Logger.info("Processed \(ByteCountFormatter.string(fromByteCount: Int64(bytesWritten), countStyle: .file)) of disk image data")
+        Logger.info("Decompressed \(ByteCountFormatter.string(fromByteCount: Int64(bytesWritten), countStyle: .file)) of disk image data")
         
         // 8. Ensure all data is written to disk
         try outputHandle.synchronize()
         try outputHandle.close()
         
-        // 9. Run sparse file optimization with cp -c exactly as in the cache pull process
+        // 9. Optimize sparse representation with cp -c
         if FileManager.default.fileExists(atPath: "/bin/cp") {
             Logger.info("Optimizing sparse file representation...")
             let optimizedPath = diskImgPath.path + ".optimized"
@@ -1584,7 +1582,7 @@ class ImageContainerRegistry: @unchecked Sendable {
             }
         }
         
-        // 10. Ensure file has correct permissions
+        // 10. Set permissions to match cache hit (0644)
         let chmodProcess = Process()
         chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
         chmodProcess.arguments = ["0644", diskImgPath.path]
@@ -1600,7 +1598,7 @@ class ImageContainerRegistry: @unchecked Sendable {
         // 12. Clean up the backup file
         try FileManager.default.removeItem(at: backupPath)
         
-        Logger.info("Simulation of cache pull behavior completed")
+        Logger.info("Cache pull simulation completed successfully")
     }
 
     private func getToken(repository: String) async throws -> String {
