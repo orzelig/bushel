@@ -1501,40 +1501,39 @@ class ImageContainerRegistry: @unchecked Sendable {
             return
         }
         
-        // 2. Get file size and other attributes
+        // 2. Get file attributes and size
         let attributes = try FileManager.default.attributesOfItem(atPath: diskImgPath.path)
         guard let diskSize = attributes[.size] as? UInt64, diskSize > 0 else {
             Logger.error("Could not determine disk.img size for simulation")
             return
         }
         
-        // 3. Rename the original file to backup
+        Logger.info("Creating sparse file with size: \(ByteCountFormatter.string(fromByteCount: Int64(diskSize), countStyle: .file))")
+        
+        // 3. Create backup of original file
         let backupPath = tempVMDir.appendingPathComponent("disk.img.original")
         try FileManager.default.moveItem(at: diskImgPath, to: backupPath)
         
-        Logger.info("Creating sparse file with size: \(ByteCountFormatter.string(fromByteCount: Int64(diskSize), countStyle: .file))")
-        
-        // 4. Create a new empty file
+        // 4. Create empty file and prepare for sparse file creation 
         guard FileManager.default.createFile(atPath: diskImgPath.path, contents: nil) else {
             // If creation fails, restore the original
             try? FileManager.default.moveItem(at: backupPath, to: diskImgPath)
             throw PullError.fileCreationFailed(diskImgPath.path)
         }
         
-        // 5. Open the file handle and set size (creates sparse file)
+        // 5. Set up file handle and create sparse file
         let outputHandle = try FileHandle(forWritingTo: diskImgPath)
         try outputHandle.truncate(atOffset: diskSize)
         
-        // 6. Add test patterns at beginning and end
-        Logger.info("Writing test patterns to verify writability...")
+        // 6. Write test patterns at beginning and end
         let testPattern = "LUME_TEST_PATTERN".data(using: .utf8)!
         try outputHandle.seek(toOffset: 0)
         try outputHandle.write(contentsOf: testPattern)
         try outputHandle.seek(toOffset: diskSize - UInt64(testPattern.count))
         try outputHandle.write(contentsOf: testPattern)
         
-        // 7. Decompress the original disk image at offset 0
-        Logger.info("Decompressing original disk image at offset 0...")
+        // 7. Decompress the original data at offset 0
+        Logger.info("Decompressing original disk image with same mechanism as cache pull...")
         let bytesWritten = try decompressChunkAndWriteSparse(
             inputPath: backupPath.path,
             outputHandle: outputHandle,
@@ -1547,7 +1546,7 @@ class ImageContainerRegistry: @unchecked Sendable {
         try outputHandle.synchronize()
         try outputHandle.close()
         
-        // 9. Optimize sparse representation with cp -c
+        // 9. Optimize sparse file with cp -c (exactly matching cache pull process)
         if FileManager.default.fileExists(atPath: "/bin/cp") {
             Logger.info("Optimizing sparse file representation...")
             let optimizedPath = diskImgPath.path + ".optimized"
@@ -1582,14 +1581,14 @@ class ImageContainerRegistry: @unchecked Sendable {
             }
         }
         
-        // 10. Set permissions to match cache hit (0644)
+        // 10. Explicitly set permissions to match cache hit (0644)
         let chmodProcess = Process()
         chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
         chmodProcess.arguments = ["0644", diskImgPath.path]
         try chmodProcess.run()
         chmodProcess.waitUntilExit()
         
-        // 11. Final sync to ensure all data is on disk
+        // 11. Final sync to ensure all data is flushed to disk
         let syncProcess = Process()
         syncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
         try syncProcess.run()
