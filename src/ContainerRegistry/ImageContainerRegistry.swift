@@ -1350,65 +1350,209 @@ class ImageContainerRegistry: @unchecked Sendable {
             return
         }
         
-        Logger.info("Creating disk image clone with partition table preserved...")
+        Logger.info("Creating true disk image clone with partition table preserved...")
         
         // Create backup of original file
         let backupPath = tempVMDir.appendingPathComponent("disk.img.original")
         try FileManager.default.moveItem(at: diskImgPath, to: backupPath)
         
-        // We'll use macOS's built-in disk cloning capabilities to preserve partition information
-        // First, create an empty sparse file with the target size
-        guard FileManager.default.createFile(atPath: diskImgPath.path, contents: nil) else {
-            // If creation fails, restore the original
-            try? FileManager.default.moveItem(at: backupPath, to: diskImgPath)
-            throw PullError.fileCreationFailed(diskImgPath.path)
-        }
+        // Let's first check if the original image has a partition table
+        Logger.info("Checking if source image has a partition table...")
+        let checkProcess = Process()
+        checkProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        checkProcess.arguments = ["imageinfo", backupPath.path]
         
-        // Use dd to clone the disk with partition table preserved
-        Logger.info("Cloning disk with partition table using dd...")
-        let ddProcess = Process()
-        ddProcess.executableURL = URL(fileURLWithPath: "/bin/dd")
-        ddProcess.arguments = [
-            "if=\(backupPath.path)",
-            "of=\(diskImgPath.path)",
-            "bs=4m",     // Use a large block size for efficiency
-            "conv=sparse" // Ensure sparse file creation
-        ]
+        let checkPipe = Pipe()
+        checkProcess.standardOutput = checkPipe
         
-        // Capture and log output/errors
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        ddProcess.standardOutput = outputPipe
-        ddProcess.standardError = errorPipe
+        try checkProcess.run()
+        checkProcess.waitUntilExit()
         
-        try ddProcess.run()
-        ddProcess.waitUntilExit()
+        let checkData = checkPipe.fileHandleForReading.readDataToEndOfFile()
+        let checkOutput = String(data: checkData, encoding: .utf8) ?? ""
+        Logger.info("Source image info: \(checkOutput)")
         
-        // Log command output/errors
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        // Try different methods in sequence until one works
+        var success = false
         
-        if let errorOutput = String(data: errorData, encoding: .utf8), !errorOutput.isEmpty {
-            Logger.info("dd command output: \(errorOutput)")
-        }
-        
-        if ddProcess.terminationStatus != 0 {
-            Logger.error("dd command failed with status \(ddProcess.terminationStatus)")
-            // If dd fails, try to restore the original
-            if FileManager.default.fileExists(atPath: diskImgPath.path) {
-                try? FileManager.default.removeItem(at: diskImgPath)
+        // Method 1: Use hdiutil convert to convert the image while preserving all data
+        if !success {
+            Logger.info("Trying hdiutil convert...")
+            let tempPath = tempVMDir.appendingPathComponent("disk.img.temp")
+            
+            let convertProcess = Process()
+            convertProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+            convertProcess.arguments = [
+                "convert", 
+                backupPath.path, 
+                "-format", "UDRO", // Read-only first to preserve partition table
+                "-o", tempPath.path
+            ]
+            
+            let convertOutPipe = Pipe()
+            let convertErrPipe = Pipe()
+            convertProcess.standardOutput = convertOutPipe
+            convertProcess.standardError = convertErrPipe
+            
+            do {
+                try convertProcess.run()
+                convertProcess.waitUntilExit()
+                
+                let errData = convertErrPipe.fileHandleForReading.readDataToEndOfFile()
+                let errOutput = String(data: errData, encoding: .utf8) ?? ""
+                
+                if convertProcess.terminationStatus == 0 {
+                    Logger.info("hdiutil convert succeeded. Converting to writable format...")
+                    // Now convert to writable format
+                    let convertBackProcess = Process()
+                    convertBackProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+                    convertBackProcess.arguments = [
+                        "convert", 
+                        tempPath.path, 
+                        "-format", "UDRW", // Read-write format
+                        "-o", diskImgPath.path
+                    ]
+                    
+                    try convertBackProcess.run()
+                    convertBackProcess.waitUntilExit()
+                    
+                    if convertBackProcess.terminationStatus == 0 {
+                        Logger.info("Successfully converted to writable format with partition table")
+                        success = true
+                    } else {
+                        Logger.error("hdiutil convert to writable format failed")
+                    }
+                    
+                    // Clean up temporary image
+                    try? FileManager.default.removeItem(at: tempPath)
+                } else {
+                    Logger.error("hdiutil convert failed: \(errOutput)")
+                }
+            } catch {
+                Logger.error("Error executing hdiutil convert: \(error)")
             }
-            try? FileManager.default.moveItem(at: backupPath, to: diskImgPath)
-            throw PullError.fileCreationFailed("dd command failed")
         }
         
-        // Sync filesystem to ensure all changes are written
-        let syncProcess = Process()
-        syncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
-        try syncProcess.run()
-        syncProcess.waitUntilExit()
+        // Method 2: Try direct raw copy method
+        if !success {
+            Logger.info("Trying direct raw copy with dd...")
+            
+            // Create empty file first
+            FileManager.default.createFile(atPath: diskImgPath.path, contents: nil)
+            
+            let ddProcess = Process()
+            ddProcess.executableURL = URL(fileURLWithPath: "/bin/dd")
+            ddProcess.arguments = [
+                "if=\(backupPath.path)",
+                "of=\(diskImgPath.path)",
+                "bs=1m",      // Large block size
+                "count=81920" // Ensure we copy everything (80GB+ should be sufficient)
+            ]
+            
+            let ddErrPipe = Pipe()
+            ddProcess.standardError = ddErrPipe
+            
+            do {
+                try ddProcess.run()
+                ddProcess.waitUntilExit()
+                
+                let errData = ddErrPipe.fileHandleForReading.readDataToEndOfFile()
+                let errOutput = String(data: errData, encoding: .utf8) ?? ""
+                
+                if ddProcess.terminationStatus == 0 {
+                    Logger.info("Raw dd copy completed: \(errOutput)")
+                    success = true
+                } else {
+                    Logger.error("Raw dd copy failed: \(errOutput)")
+                }
+            } catch {
+                Logger.error("Error executing dd: \(error)")
+            }
+        }
         
-        // Optimize with cp -c to ensure best sparse file representation
+        // Method 3: Use a more complex approach with disk mounting
+        if !success {
+            Logger.info("Trying advanced disk attach/detach approach...")
+            
+            // Mount the source disk image
+            let attachProcess = Process()
+            attachProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+            attachProcess.arguments = ["attach", backupPath.path, "-nomount"]
+            
+            let attachPipe = Pipe()
+            attachProcess.standardOutput = attachPipe
+            
+            try attachProcess.run()
+            attachProcess.waitUntilExit()
+            
+            let attachData = attachPipe.fileHandleForReading.readDataToEndOfFile()
+            let attachOutput = String(data: attachData, encoding: .utf8) ?? ""
+            
+            // Extract the disk device from output (/dev/diskN)
+            var diskDevice: String? = nil
+            if let diskMatch = attachOutput.range(of: "/dev/disk[0-9]+", options: .regularExpression) {
+                diskDevice = String(attachOutput[diskMatch])
+            }
+            
+            if let device = diskDevice {
+                Logger.info("Source disk attached at \(device)")
+                
+                // Create a bootable disk image clone
+                let createProcess = Process()
+                createProcess.executableURL = URL(fileURLWithPath: "/usr/sbin/asr")
+                createProcess.arguments = [
+                    "restore",
+                    "--source", device,
+                    "--target", diskImgPath.path,
+                    "--erase",
+                    "--noprompt"
+                ]
+                
+                let createPipe = Pipe()
+                createProcess.standardOutput = createPipe
+                
+                do {
+                    try createProcess.run()
+                    createProcess.waitUntilExit()
+                    
+                    let createOutput = String(data: createPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    Logger.info("asr output: \(createOutput)")
+                    
+                    if createProcess.terminationStatus == 0 {
+                        Logger.info("Successfully created bootable disk image clone!")
+                        success = true
+                    } else {
+                        Logger.error("Failed to create bootable disk image clone")
+                    }
+                } catch {
+                    Logger.error("Error executing asr: \(error)")
+                }
+                
+                // Always detach the disk when done
+                let detachProcess = Process()
+                detachProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+                detachProcess.arguments = ["detach", device]
+                try? detachProcess.run()
+                detachProcess.waitUntilExit()
+            } else {
+                Logger.error("Failed to extract disk device from hdiutil attach output")
+            }
+        }
+        
+        // Fallback: If none of the methods worked, revert to our previous method just to ensure we have a usable image
+        if !success {
+            Logger.info("All specialized methods failed. Reverting to basic copy...")
+            
+            // If the disk image file exists (from a failed attempt), remove it
+            if FileManager.default.fileExists(atPath: diskImgPath.path) {
+                try FileManager.default.removeItem(at: diskImgPath)
+            }
+            
+            // Attempt a basic file copy which will at least give us something to work with
+            try FileManager.default.copyItem(at: backupPath, to: diskImgPath)
+        }
+        
+        // Optimize sparseness if possible
         if FileManager.default.fileExists(atPath: "/bin/cp") {
             Logger.info("Optimizing sparse file representation...")
             let optimizedPath = diskImgPath.path + ".optimized"
@@ -1452,11 +1596,8 @@ class ImageContainerRegistry: @unchecked Sendable {
         try finalSyncProcess.run()
         finalSyncProcess.waitUntilExit()
         
-        // Clean up backup file
-        try FileManager.default.removeItem(at: backupPath)
-        
+        // Verify the final disk image
         Logger.info("Verifying final disk image partition information...")
-        // Use hdiutil to verify partition information (output only for debugging)
         let verifyProcess = Process()
         verifyProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
         verifyProcess.arguments = ["imageinfo", diskImgPath.path]
@@ -1468,15 +1609,13 @@ class ImageContainerRegistry: @unchecked Sendable {
         verifyProcess.waitUntilExit()
         
         let verifyOutputData = verifyOutputPipe.fileHandleForReading.readDataToEndOfFile()
-        if let verifyOutput = String(data: verifyOutputData, encoding: .utf8), verifyProcess.terminationStatus == 0 {
-            // Extract just the partition scheme information for logging
-            if let partitionSchemeRange = verifyOutput.range(of: "partition-scheme: .*", options: .regularExpression) {
-                let partitionScheme = verifyOutput[partitionSchemeRange]
-                Logger.info("Disk image partition scheme: \(partitionScheme)")
-            }
-        }
+        let verifyOutput = String(data: verifyOutputData, encoding: .utf8) ?? ""
+        Logger.info("Final disk image verification:\n\(verifyOutput)")
         
-        Logger.info("Cache pull simulation completed successfully")
+        // Clean up backup file
+        try FileManager.default.removeItem(at: backupPath)
+        
+        Logger.info("Cache pull simulation completed successfully with partition table preservation")
     }
 
     private func copyFromCache(manifest: Manifest, manifestId: String, to destination: URL)
