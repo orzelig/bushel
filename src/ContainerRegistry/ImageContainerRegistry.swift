@@ -1400,14 +1400,14 @@ class ImageContainerRegistry: @unchecked Sendable {
         async throws
     {
         Logger.info("Copying from cache...")
-
+        
         // Define output URL and expected size variable scope here
         let outputURL = destination.appendingPathComponent("disk.img")
-        var expectedTotalSize: UInt64? = nil  // Use optional to handle missing config
+        var expectedTotalSize: UInt64? = nil // Use optional to handle missing config
 
         // Instantiate collector
         let diskPartsCollector = DiskPartsCollector()
-        var lz4LayerCount = 0  // Count lz4 layers found
+        var lz4LayerCount = 0 // Count lz4 layers found
 
         // First identify disk parts and non-disk files
         for layer in manifest.layers {
@@ -1415,14 +1415,21 @@ class ImageContainerRegistry: @unchecked Sendable {
 
             // Identify disk parts simply by media type
             if layer.mediaType == "application/octet-stream+lz4" {
-                lz4LayerCount += 1  // Increment count
-                // Add to collector. It will assign the sequential part number.
-                let collectorPartNum = await diskPartsCollector.addPart(url: cachedLayer)
-                Logger.info(
-                    "Adding cached lz4 layer (part \(lz4LayerCount)) -> Collector #\(collectorPartNum): \(cachedLayer.lastPathComponent)"
-                )
-            } else {
-                // --- Handle Non-Disk-Part Layer (from cache) ---
+                 lz4LayerCount += 1 // Increment count
+                 
+                 // When caching is disabled, the file might not exist with the cache path name
+                 // Check if the file exists before trying to use it
+                 if !FileManager.default.fileExists(atPath: cachedLayer.path) {
+                     Logger.info("Layer file not found in cache: \(cachedLayer.path) - skipping")
+                     continue
+                 }
+                 
+                 // Add to collector. It will assign the sequential part number.
+                 let collectorPartNum = await diskPartsCollector.addPart(url: cachedLayer) 
+                 Logger.info("Adding cached lz4 layer (part \(lz4LayerCount)) -> Collector #\(collectorPartNum): \(cachedLayer.lastPathComponent)")
+            }
+            else {
+                 // --- Handle Non-Disk-Part Layer (from cache) ---
                 let fileName: String
                 switch layer.mediaType {
                 case "application/vnd.oci.image.config.v1+json":
@@ -1430,14 +1437,21 @@ class ImageContainerRegistry: @unchecked Sendable {
                 case "application/octet-stream":
                     // Assume nvram if config layer exists, otherwise assume single disk image
                     fileName = manifest.config != nil ? "nvram.bin" : "disk.img"
-                case "application/vnd.oci.image.layer.v1.tar",
-                    "application/octet-stream+gzip":
-                    // Assume disk image for these types as well if encountered in cache scenario
-                    fileName = "disk.img"
+                case "application/vnd.oci.image.layer.v1.tar", 
+                     "application/octet-stream+gzip":
+                     // Assume disk image for these types as well if encountered in cache scenario
+                     fileName = "disk.img"
                 default:
-                    Logger.info("Skipping unsupported cached layer media type: \(layer.mediaType)")
+                     Logger.info("Skipping unsupported cached layer media type: \(layer.mediaType)")
                     continue
                 }
+                
+                // When caching is disabled, the file might not exist with the cache path name
+                if !FileManager.default.fileExists(atPath: cachedLayer.path) {
+                    Logger.info("Non-disk layer file not found in cache: \(cachedLayer.path) - skipping")
+                    continue
+                }
+                
                 // Copy the non-disk file directly from cache to destination
                 try FileManager.default.copyItem(
                     at: cachedLayer,
@@ -1815,9 +1829,16 @@ class ImageContainerRegistry: @unchecked Sendable {
                 try FileManager.default.moveItem(at: tempURL, to: url)
                 progress.addProgress(Int64(httpResponse.expectedContentLength))
 
-                // Cache the downloaded layer if caching is enabled
-                if cachingEnabled, let manifestId = manifestId {
+                // Always save a copy to the cache directory for use by copyFromCache,
+                // even if caching is disabled
+                if let manifestId = manifestId {
                     let cachedLayer = getCachedLayerPath(manifestId: manifestId, digest: digest)
+                    // Make sure cache directory exists
+                    try FileManager.default.createDirectory(
+                        at: cachedLayer.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    
                     if FileManager.default.fileExists(atPath: cachedLayer.path) {
                         try FileManager.default.removeItem(at: cachedLayer)
                     }
