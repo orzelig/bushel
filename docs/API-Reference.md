@@ -194,6 +194,42 @@ curl --connect-timeout 6000 \
 </details>
 
 <details open>
+<summary><strong>Push Image (Async)</strong> - POST /vms/push</summary>
+
+```bash
+# Push VM 'my-local-vm' to 'my-org/my-image:latest' and 'my-org/my-image:v1'
+curl --connect-timeout 6000 \
+  --max-time 5000 \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-local-vm", 
+    "imageName": "my-image",
+    "tags": ["latest", "v1"],
+    "organization": "my-org", 
+    "registry": "ghcr.io",
+    "chunkSizeMb": 512,
+    "storage": null 
+  }' \
+  http://localhost:3000/lume/vms/push 
+```
+
+**Response (202 Accepted):**
+
+```json
+{
+  "message": "Push initiated in background",
+  "name": "my-local-vm",
+  "imageName": "my-image",
+  "tags": [
+    "latest",
+    "v1"
+  ]
+}
+```
+</details>
+
+<details open>
 <summary><strong>Clone VM</strong> - POST /vms/:name/clone</summary>
 
 ```bash
