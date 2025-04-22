@@ -399,20 +399,53 @@ final class LumeController {
         storage: String? = nil
     ) async throws {
         do {
-            let vmName: String = name ?? normalizeVMName(name: image)
+            // Convert non-sparse image to sparse version if needed
+            var actualImage = image
+            var actualName = name
+
+            // Check if image is a non-sparse version (doesn't contain -sparse)
+            if !image.contains("-sparse") {
+                // Split the image to get name and tag
+                let components = image.split(separator: ":")
+                guard components.count == 2 else {
+                    throw ValidationError("Invalid image format. Expected format: name:tag")
+                }
+
+                let originalName = String(components[0])
+                let tag = String(components[1])
+
+                // Create sparse version of the image name
+                actualImage = "\(originalName)-sparse:\(tag)"
+
+                // If name wasn't explicitly provided, use the original image name (without -sparse)
+                if actualName == nil {
+                    actualName = originalName
+                }
+
+                Logger.info(
+                    "Converting to sparse image",
+                    metadata: [
+                        "original": image,
+                        "sparse": actualImage,
+                        "vm_name": actualName ?? "default",
+                    ]
+                )
+            }
+
+            let vmName: String = actualName ?? normalizeVMName(name: actualImage)
 
             Logger.info(
                 "Pulling image",
                 metadata: [
-                    "image": image,
-                    "name": name ?? "default",
+                    "image": actualImage,
+                    "name": actualName ?? "default",
                     "registry": registry,
                     "organization": organization,
                     "location": storage ?? "default",
                 ])
 
             try self.validatePullParameters(
-                image: image,
+                image: actualImage,
                 name: vmName,
                 registry: registry,
                 organization: organization,
@@ -422,7 +455,7 @@ final class LumeController {
             let imageContainerRegistry = ImageContainerRegistry(
                 registry: registry, organization: organization)
             try await imageContainerRegistry.pull(
-                image: image,
+                image: actualImage,
                 name: vmName,
                 locationName: storage)
 
@@ -440,7 +473,7 @@ final class LumeController {
             Logger.info(
                 "Image pulled successfully",
                 metadata: [
-                    "image": image,
+                    "image": actualImage,
                     "name": vmName,
                     "registry": registry,
                     "organization": organization,
@@ -477,7 +510,7 @@ final class LumeController {
                     "location": storage ?? "default",
                     "chunk_size": "\(chunkSizeMb)MB",
                     "dry_run": "\(dryRun)",
-                    "reassemble": "\(reassemble)"
+                    "reassemble": "\(reassemble)",
                 ])
 
             try validatePushParameters(
@@ -490,14 +523,14 @@ final class LumeController {
 
             // Find the actual location of the VM
             let actualLocation = try self.validateVMExists(name, storage: storage)
-            
+
             // Get the VM directory
             let vmDir = try home.getVMDirectory(name, storage: actualLocation)
-            
-            // Use ImageContainerRegistry to push the VM 
+
+            // Use ImageContainerRegistry to push the VM
             let imageContainerRegistry = ImageContainerRegistry(
                 registry: registry, organization: organization)
-            
+
             try await imageContainerRegistry.push(
                 vmDirPath: vmDir.dir.path,
                 imageName: imageName,
@@ -849,7 +882,7 @@ final class LumeController {
         guard !organization.isEmpty else {
             throw ValidationError("Organization cannot be empty")
         }
-        
+
         // Verify VM exists (this will throw if not found)
         _ = try self.validateVMExists(name)
     }
