@@ -1238,6 +1238,137 @@ class ImageContainerRegistry: @unchecked Sendable {
         )
     }
 
+    // Shared function to handle disk image creation - can be used by both cache hit and cache miss paths
+    private func createDiskImageFromSource(
+        sourceURL: URL,  // Source data to decompress
+        destinationURL: URL,  // Where to create the disk image
+        diskSize: UInt64      // Total size for the sparse file
+    ) throws {
+        Logger.info("Creating sparse disk image...")
+        
+        // Create empty destination file
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try FileManager.default.removeItem(at: destinationURL)
+        }
+        guard FileManager.default.createFile(atPath: destinationURL.path, contents: nil) else {
+            throw PullError.fileCreationFailed(destinationURL.path)
+        }
+        
+        // Create sparse file
+        let outputHandle = try FileHandle(forWritingTo: destinationURL)
+        try outputHandle.truncate(atOffset: diskSize)
+        
+        // Write test patterns at beginning and end
+        Logger.info("Writing test patterns to verify writability...")
+        let testPattern = "LUME_TEST_PATTERN".data(using: .utf8)!
+        try outputHandle.seek(toOffset: 0)
+        try outputHandle.write(contentsOf: testPattern)
+        try outputHandle.seek(toOffset: diskSize - UInt64(testPattern.count))
+        try outputHandle.write(contentsOf: testPattern)
+        try outputHandle.synchronize()
+        
+        // Decompress the source data at offset 0
+        Logger.info("Decompressing source data...")
+        let bytesWritten = try decompressChunkAndWriteSparse(
+            inputPath: sourceURL.path,
+            outputHandle: outputHandle,
+            startOffset: 0
+        )
+        Logger.info("Decompressed \(ByteCountFormatter.string(fromByteCount: Int64(bytesWritten), countStyle: .file)) of data")
+        
+        // Ensure data is written and close handle
+        try outputHandle.synchronize()
+        try outputHandle.close()
+        
+        // Run sync to flush filesystem
+        let syncProcess = Process()
+        syncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
+        try syncProcess.run()
+        syncProcess.waitUntilExit()
+        
+        // Optimize with cp -c
+        if FileManager.default.fileExists(atPath: "/bin/cp") {
+            Logger.info("Optimizing sparse file representation...")
+            let optimizedPath = destinationURL.path + ".optimized"
+            
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/cp")
+            process.arguments = ["-c", destinationURL.path, optimizedPath]
+            
+            try process.run()
+            process.waitUntilExit()
+            
+            if process.terminationStatus == 0 {
+                // Get optimization results
+                let optimizedSize = (try? FileManager.default.attributesOfItem(atPath: optimizedPath)[.size] as? UInt64) ?? 0
+                let originalUsage = getActualDiskUsage(path: destinationURL.path)
+                let optimizedUsage = getActualDiskUsage(path: optimizedPath)
+                
+                Logger.info(
+                    "Sparse optimization results: Before: \(ByteCountFormatter.string(fromByteCount: Int64(originalUsage), countStyle: .file)) actual usage, After: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedUsage), countStyle: .file)) actual usage (Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedSize), countStyle: .file)))"
+                )
+                
+                // Replace original with optimized
+                try FileManager.default.removeItem(at: destinationURL)
+                try FileManager.default.moveItem(at: URL(fileURLWithPath: optimizedPath), to: destinationURL)
+                Logger.info("Replaced with optimized sparse version")
+            } else {
+                Logger.info("Sparse optimization failed, using original file")
+                try? FileManager.default.removeItem(atPath: optimizedPath)
+            }
+        }
+        
+        // Set permissions to 0644
+        let chmodProcess = Process()
+        chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        chmodProcess.arguments = ["0644", destinationURL.path]
+        try chmodProcess.run()
+        chmodProcess.waitUntilExit()
+        
+        // Final sync
+        let finalSyncProcess = Process()
+        finalSyncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
+        try finalSyncProcess.run()
+        finalSyncProcess.waitUntilExit()
+    }
+
+    // Function to simulate cache pull behavior for freshly downloaded images
+    private func simulateCachePull(tempVMDir: URL) throws {
+        Logger.info("Simulating cache pull behavior for freshly downloaded image...")
+        
+        // Find disk.img in tempVMDir
+        let diskImgPath = tempVMDir.appendingPathComponent("disk.img")
+        guard FileManager.default.fileExists(atPath: diskImgPath.path) else {
+            Logger.info("No disk.img found to simulate cache pull behavior")
+            return
+        }
+        
+        // Get file attributes and size
+        let attributes = try FileManager.default.attributesOfItem(atPath: diskImgPath.path)
+        guard let diskSize = attributes[.size] as? UInt64, diskSize > 0 else {
+            Logger.error("Could not determine disk.img size for simulation")
+            return
+        }
+        
+        Logger.info("Creating sparse file with size: \(ByteCountFormatter.string(fromByteCount: Int64(diskSize), countStyle: .file))")
+        
+        // Create backup of original file
+        let backupPath = tempVMDir.appendingPathComponent("disk.img.original")
+        try FileManager.default.moveItem(at: diskImgPath, to: backupPath)
+        
+        // Use shared function to create the disk image
+        try createDiskImageFromSource(
+            sourceURL: backupPath,
+            destinationURL: diskImgPath,
+            diskSize: diskSize
+        )
+        
+        // Clean up backup
+        try FileManager.default.removeItem(at: backupPath)
+        
+        Logger.info("Cache pull simulation completed successfully")
+    }
+
     private func copyFromCache(manifest: Manifest, manifestId: String, to destination: URL)
         async throws
     {
@@ -1249,8 +1380,6 @@ class ImageContainerRegistry: @unchecked Sendable {
 
         // Instantiate collector
         let diskPartsCollector = DiskPartsCollector()
-        // Remove totalDiskParts
-        // var totalDiskParts: Int? = nil
         var lz4LayerCount = 0 // Count lz4 layers found
 
         // First identify disk parts and non-disk files
@@ -1293,12 +1422,6 @@ class ImageContainerRegistry: @unchecked Sendable {
         let diskPartSources = await diskPartsCollector.getSortedParts() // Sorted by assigned sequential number
         let totalParts = await diskPartsCollector.getTotalParts() // Get total count from collector
 
-        // Remove old guard check
-        /*
-        guard let totalParts = totalDiskParts else {
-            Logger.info("No cached layers with valid part information found. Assuming single-part image or non-lz4 parts.")
-        }
-        */
         Logger.info("Found \(totalParts) lz4 disk parts in cache to reassemble.")
         // --- End retrieving parts --- 
 
@@ -1355,310 +1478,156 @@ class ImageContainerRegistry: @unchecked Sendable {
                  throw PullError.reassemblySetupFailed(path: outputURL.path, underlyingError: nilError ?? NoSpecificUnderlyingError())
             }
 
-            // Wrap file handle setup and sparse file creation within this block
-            let outputHandle: FileHandle
-            do {
-                // Ensure parent directory exists
-                try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                // Explicitly create the file first, removing old one if needed
-                if FileManager.default.fileExists(atPath: outputURL.path) {
-                    try FileManager.default.removeItem(at: outputURL)
-                }
-                guard FileManager.default.createFile(atPath: outputURL.path, contents: nil) else {
-                    throw PullError.fileCreationFailed(outputURL.path)
-                }
-                // Open handle for writing
-                outputHandle = try FileHandle(forWritingTo: outputURL)
-                // Set the file size (creates sparse file)
-                try outputHandle.truncate(atOffset: sizeForTruncate)
-                Logger.info("Sparse file initialized for cache reassembly with size: \(ByteCountFormatter.string(fromByteCount: Int64(sizeForTruncate), countStyle: .file))")
-            } catch {
-                 Logger.error("Failed during setup for cached disk image reassembly: \(error.localizedDescription)", metadata: ["path": outputURL.path])
-                 throw PullError.reassemblySetupFailed(path: outputURL.path, underlyingError: error)
-            }
-
-            // Ensure handle is closed when exiting this scope
-            defer { try? outputHandle.close() }
-
-            // ... (Get uncompressed size etc.) ...
-
-            var reassemblyProgressLogger = ProgressLogger(threshold: 0.05)
-            var currentOffset: UInt64 = 0
-
-            // Iterate from 1 up to the total number of parts found by the collector
-            for collectorPartNum in 1...totalParts {
-                // Find the source URL from our collected parts using the sequential collectorPartNum
-                guard let sourceInfo = diskPartSources.first(where: { $0.0 == collectorPartNum }) else {
-                    Logger.error("Missing required cached part number \(collectorPartNum) in collected parts during reassembly.")
-                    throw PullError.missingPart(collectorPartNum)
-                }
-                let sourceURL = sourceInfo.1 // Get URL from tuple
-
-                // Log using the sequential collector part number
-                Logger.info(
-                    "Decompressing part \(collectorPartNum) of \(totalParts) from cache: \(sourceURL.lastPathComponent) at offset \(currentOffset)..."
+            // If we have just one disk part, use the shared function
+            if totalParts == 1 {
+                // Single part - use shared function
+                let sourceURL = diskPartSources[0].1 // Get the first source URL (index 1 of the tuple)
+                try createDiskImageFromSource(
+                    sourceURL: sourceURL,
+                    destinationURL: outputURL,
+                    diskSize: sizeForTruncate
                 )
-
-                // Always use the correct sparse decompression function
-                let decompressedBytesWritten = try decompressChunkAndWriteSparse(
-                    inputPath: sourceURL.path,
-                    outputHandle: outputHandle,
-                    startOffset: currentOffset
-                )
-                currentOffset += decompressedBytesWritten
-                // Update progress (using sizeForTruncate which should be available)
-                reassemblyProgressLogger.logProgress(
-                        current: Double(currentOffset) / Double(sizeForTruncate), 
-                        context: "Reassembling Cache")
-                
-                try outputHandle.synchronize() // Explicitly synchronize after each chunk
-            }
-
-            // Finalize progress, close handle (done by defer)
-            reassemblyProgressLogger.logProgress(current: 1.0, context: "Reassembly Complete")
-
-            // Add test patterns at the beginning and end of the file
-            Logger.info("Writing test patterns to sparse file to verify integrity...")
-            let testPattern = "LUME_TEST_PATTERN".data(using: .utf8)!
-            try outputHandle.seek(toOffset: 0)
-            try outputHandle.write(contentsOf: testPattern)
-            try outputHandle.seek(toOffset: sizeForTruncate - UInt64(testPattern.count))
-            try outputHandle.write(contentsOf: testPattern)
-            try outputHandle.synchronize()
-            
-            // Ensure handle is properly synchronized before closing
-            try outputHandle.synchronize()
-            
-            // Close handle explicitly instead of relying on defer
-            try outputHandle.close()
-            
-            // Verify final size
-            let finalSize =
-                (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size]
-                    as? UInt64) ?? 0
-            Logger.info(
-                "Final disk image size from cache (before sparse file optimization): \(ByteCountFormatter.string(fromByteCount: Int64(finalSize), countStyle: .file))"
-            )
-
-            // Use the calculated sizeForTruncate for comparison
-            if finalSize != sizeForTruncate {
-                Logger.info(
-                    "Warning: Final reported size (\(finalSize) bytes) differs from expected size (\(sizeForTruncate) bytes), but this doesn't affect functionality"
-                )
-            }
-
-            Logger.info("Disk image reassembly completed")
-            
-            // Optimize sparseness for cached reassembly if on macOS
-            if FileManager.default.fileExists(atPath: "/bin/cp") {
-                Logger.info("Optimizing sparse file representation for cached reassembly...")
-                let optimizedPath = outputURL.path + ".optimized"
-                
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/bin/cp")
-                process.arguments = ["-c", outputURL.path, optimizedPath]
-                
+            } else {
+                // Multiple parts - we need to reassemble
+                // Wrap file handle setup and sparse file creation within this block
+                let outputHandle: FileHandle
                 do {
-                    try process.run()
-                    process.waitUntilExit()
-                    
-                    if process.terminationStatus == 0 {
-                        // Get size of optimized file
-                        let optimizedSize = (try? FileManager.default.attributesOfItem(atPath: optimizedPath)[.size] as? UInt64) ?? 0
-                        let originalUsage = getActualDiskUsage(path: outputURL.path)
-                        let optimizedUsage = getActualDiskUsage(path: optimizedPath)
-                        
-                        Logger.info(
-                            "Sparse optimization results for cache: Before: \(ByteCountFormatter.string(fromByteCount: Int64(originalUsage), countStyle: .file)) actual usage, After: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedUsage), countStyle: .file)) actual usage (Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedSize), countStyle: .file)))"
-                        )
-                        
-                        // Replace the original with the optimized version
+                    // Ensure parent directory exists
+                    try FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    // Explicitly create the file first, removing old one if needed
+                    if FileManager.default.fileExists(atPath: outputURL.path) {
                         try FileManager.default.removeItem(at: outputURL)
-                        try FileManager.default.moveItem(at: URL(fileURLWithPath: optimizedPath), to: outputURL)
-                        Logger.info("Replaced cached reassembly with optimized sparse version")
-                    } else {
-                        Logger.info("Sparse optimization failed for cache, using original file")
+                    }
+                    guard FileManager.default.createFile(atPath: outputURL.path, contents: nil) else {
+                        throw PullError.fileCreationFailed(outputURL.path)
+                    }
+                    // Open handle for writing
+                    outputHandle = try FileHandle(forWritingTo: outputURL)
+                    // Set the file size (creates sparse file)
+                    try outputHandle.truncate(atOffset: sizeForTruncate)
+                    Logger.info("Sparse file initialized for cache reassembly with size: \(ByteCountFormatter.string(fromByteCount: Int64(sizeForTruncate), countStyle: .file))")
+                } catch {
+                     Logger.error("Failed during setup for cached disk image reassembly: \(error.localizedDescription)", metadata: ["path": outputURL.path])
+                     throw PullError.reassemblySetupFailed(path: outputURL.path, underlyingError: error)
+                }
+
+                // Ensure handle is closed when exiting this scope
+                defer { try? outputHandle.close() }
+
+                var reassemblyProgressLogger = ProgressLogger(threshold: 0.05)
+                var currentOffset: UInt64 = 0
+
+                // Iterate from 1 up to the total number of parts found by the collector
+                for collectorPartNum in 1...totalParts {
+                    // Find the source URL from our collected parts using the sequential collectorPartNum
+                    guard let sourceInfo = diskPartSources.first(where: { $0.0 == collectorPartNum }) else {
+                        Logger.error("Missing required cached part number \(collectorPartNum) in collected parts during reassembly.")
+                        throw PullError.missingPart(collectorPartNum)
+                    }
+                    let sourceURL = sourceInfo.1 // Get URL from tuple
+
+                    // Log using the sequential collector part number
+                    Logger.info(
+                        "Decompressing part \(collectorPartNum) of \(totalParts) from cache: \(sourceURL.lastPathComponent) at offset \(currentOffset)..."
+                    )
+
+                    // Always use the correct sparse decompression function
+                    let decompressedBytesWritten = try decompressChunkAndWriteSparse(
+                        inputPath: sourceURL.path,
+                        outputHandle: outputHandle,
+                        startOffset: currentOffset
+                    )
+                    currentOffset += decompressedBytesWritten
+                    // Update progress (using sizeForTruncate which should be available)
+                    reassemblyProgressLogger.logProgress(
+                            current: Double(currentOffset) / Double(sizeForTruncate), 
+                            context: "Reassembling Cache")
+                    
+                    try outputHandle.synchronize() // Explicitly synchronize after each chunk
+                }
+
+                // Finalize progress, close handle (done by defer)
+                reassemblyProgressLogger.logProgress(current: 1.0, context: "Reassembly Complete")
+
+                // Add test patterns at the beginning and end of the file
+                Logger.info("Writing test patterns to sparse file to verify integrity...")
+                let testPattern = "LUME_TEST_PATTERN".data(using: .utf8)!
+                try outputHandle.seek(toOffset: 0)
+                try outputHandle.write(contentsOf: testPattern)
+                try outputHandle.seek(toOffset: sizeForTruncate - UInt64(testPattern.count))
+                try outputHandle.write(contentsOf: testPattern)
+                try outputHandle.synchronize()
+                
+                // Ensure handle is properly synchronized before closing
+                try outputHandle.synchronize()
+                
+                // Close handle explicitly instead of relying on defer
+                try outputHandle.close()
+                
+                // Verify final size
+                let finalSize =
+                    (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size]
+                        as? UInt64) ?? 0
+                Logger.info(
+                    "Final disk image size from cache (before sparse file optimization): \(ByteCountFormatter.string(fromByteCount: Int64(finalSize), countStyle: .file))"
+                )
+
+                // Use the calculated sizeForTruncate for comparison
+                if finalSize != sizeForTruncate {
+                    Logger.info(
+                        "Warning: Final reported size (\(finalSize) bytes) differs from expected size (\(sizeForTruncate) bytes), but this doesn't affect functionality"
+                    )
+                }
+
+                Logger.info("Disk image reassembly completed")
+                
+                // Optimize sparseness for cached reassembly if on macOS
+                if FileManager.default.fileExists(atPath: "/bin/cp") {
+                    Logger.info("Optimizing sparse file representation for cached reassembly...")
+                    let optimizedPath = outputURL.path + ".optimized"
+                    
+                    let process = Process()
+                    process.executableURL = URL(fileURLWithPath: "/bin/cp")
+                    process.arguments = ["-c", outputURL.path, optimizedPath]
+                    
+                    do {
+                        try process.run()
+                        process.waitUntilExit()
+                        
+                        if process.terminationStatus == 0 {
+                            // Get size of optimized file
+                            let optimizedSize = (try? FileManager.default.attributesOfItem(atPath: optimizedPath)[.size] as? UInt64) ?? 0
+                            let originalUsage = getActualDiskUsage(path: outputURL.path)
+                            let optimizedUsage = getActualDiskUsage(path: optimizedPath)
+                            
+                            Logger.info(
+                                "Sparse optimization results for cache: Before: \(ByteCountFormatter.string(fromByteCount: Int64(originalUsage), countStyle: .file)) actual usage, After: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedUsage), countStyle: .file)) actual usage (Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedSize), countStyle: .file)))"
+                            )
+                            
+                            // Replace the original with the optimized version
+                            try FileManager.default.removeItem(at: outputURL)
+                            try FileManager.default.moveItem(at: URL(fileURLWithPath: optimizedPath), to: outputURL)
+                            Logger.info("Replaced cached reassembly with optimized sparse version")
+                        } else {
+                            Logger.info("Sparse optimization failed for cache, using original file")
+                            try? FileManager.default.removeItem(atPath: optimizedPath)
+                        }
+                    } catch {
+                        Logger.info("Error during sparse optimization for cache: \(error.localizedDescription)")
                         try? FileManager.default.removeItem(atPath: optimizedPath)
                     }
-                } catch {
-                    Logger.info("Error during sparse optimization for cache: \(error.localizedDescription)")
-                    try? FileManager.default.removeItem(atPath: optimizedPath)
                 }
+                
+                // Set permissions to ensure consistency
+                let chmodProcess = Process()
+                chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
+                chmodProcess.arguments = ["0644", outputURL.path]
+                try chmodProcess.run()
+                chmodProcess.waitUntilExit()
             }
         }
 
         Logger.info("Cache copy complete")
-    }
-
-    // Function to simulate cache pull behavior for freshly downloaded images
-    private func simulateCachePull(tempVMDir: URL) throws {
-        Logger.info("Simulating cache pull behavior for freshly downloaded image...")
-        
-        // 1. Find disk.img in tempVMDir
-        let diskImgPath = tempVMDir.appendingPathComponent("disk.img")
-        guard FileManager.default.fileExists(atPath: diskImgPath.path) else {
-            Logger.info("No disk.img found to simulate cache pull behavior")
-            return
-        }
-        
-        // 2. Get file attributes and size
-        let attributes = try FileManager.default.attributesOfItem(atPath: diskImgPath.path)
-        guard let diskSize = attributes[.size] as? UInt64, diskSize > 0 else {
-            Logger.error("Could not determine disk.img size for simulation")
-            return
-        }
-        
-        Logger.info("Creating sparse file with size: \(ByteCountFormatter.string(fromByteCount: Int64(diskSize), countStyle: .file))")
-        
-        // 3. Create backup of original file
-        let backupPath = tempVMDir.appendingPathComponent("disk.img.original")
-        try FileManager.default.moveItem(at: diskImgPath, to: backupPath)
-        
-        // 4. Create empty file and prepare for sparse file creation 
-        guard FileManager.default.createFile(atPath: diskImgPath.path, contents: nil) else {
-            // If creation fails, restore the original
-            try? FileManager.default.moveItem(at: backupPath, to: diskImgPath)
-            throw PullError.fileCreationFailed(diskImgPath.path)
-        }
-        
-        // Run an initial filesystem sync
-        let initialSyncProcess = Process()
-        initialSyncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
-        try initialSyncProcess.run()
-        initialSyncProcess.waitUntilExit()
-        
-        // IMPORTANT: Use autoreleasepool to ensure file handle is released promptly
-        try autoreleasepool {
-            // 5. Set up file handle and create sparse file
-            let outputHandle = try FileHandle(forWritingTo: diskImgPath)
-            try outputHandle.truncate(atOffset: diskSize)
-            
-            // 6. Write test patterns at beginning and end
-            Logger.info("Writing test patterns to verify writability...")
-            let testPattern = "LUME_TEST_PATTERN".data(using: .utf8)!
-            try outputHandle.seek(toOffset: 0)
-            try outputHandle.write(contentsOf: testPattern)
-            try outputHandle.seek(toOffset: diskSize - UInt64(testPattern.count))
-            try outputHandle.write(contentsOf: testPattern)
-            
-            // Make sure test patterns are synced to disk first
-            try outputHandle.synchronize()
-            
-            // 7. Decompress the original data at offset 0
-            Logger.info("Decompressing original disk image with same mechanism as cache pull...")
-            let bytesWritten = try decompressChunkAndWriteSparse(
-                inputPath: backupPath.path,
-                outputHandle: outputHandle,
-                startOffset: 0
-            )
-            
-            Logger.info("Decompressed \(ByteCountFormatter.string(fromByteCount: Int64(bytesWritten), countStyle: .file)) of disk image data")
-            
-            // 8. Ensure all data is written to disk with multiple explicit syncs
-            try outputHandle.synchronize()
-            
-            // Force an fsync using lower-level API for the file descriptor
-            let fd = outputHandle.fileDescriptor
-            if fd >= 0 {
-                fsync(fd)
-                Logger.info("Performed low-level fsync on file descriptor")
-            }
-            
-            // Very important: explicitly close the handle here inside the autorelease pool
-            try outputHandle.close()
-            Logger.info("File handle explicitly closed after decompression and synchronization")
-        }
-        
-        // Perform an explicit filesystem sync after closing the file handle
-        let postCloseSyncProcess = Process()
-        postCloseSyncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
-        try postCloseSyncProcess.run()
-        postCloseSyncProcess.waitUntilExit()
-        
-        // Wait longer to ensure all filesystem operations are complete
-        Logger.info("Waiting for filesystem operations to complete...")
-        Thread.sleep(forTimeInterval: 1.0)
-        
-        // 9. Optimize sparse file with cp -c (exactly matching cache pull process)
-        if FileManager.default.fileExists(atPath: "/bin/cp") {
-            Logger.info("Optimizing sparse file representation...")
-            let optimizedPath = diskImgPath.path + ".optimized"
-            
-            // Run a sync before optimization
-            let syncBeforeOptimize = Process()
-            syncBeforeOptimize.executableURL = URL(fileURLWithPath: "/bin/sync")
-            try syncBeforeOptimize.run()
-            syncBeforeOptimize.waitUntilExit()
-            
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/cp")
-            process.arguments = ["-c", diskImgPath.path, optimizedPath]
-            
-            do {
-                try process.run()
-                process.waitUntilExit()
-                
-                if process.terminationStatus == 0 {
-                    let optimizedSize = (try? FileManager.default.attributesOfItem(atPath: optimizedPath)[.size] as? UInt64) ?? 0
-                    let originalUsage = getActualDiskUsage(path: diskImgPath.path)
-                    let optimizedUsage = getActualDiskUsage(path: optimizedPath)
-                    
-                    Logger.info(
-                        "Sparse optimization results: Before: \(ByteCountFormatter.string(fromByteCount: Int64(originalUsage), countStyle: .file)) actual usage, After: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedUsage), countStyle: .file)) actual usage (Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedSize), countStyle: .file)))"
-                    )
-                    
-                    // Before replacing the file, make sure to synchronize the filesystem
-                    let syncBeforeReplace = Process()
-                    syncBeforeReplace.executableURL = URL(fileURLWithPath: "/bin/sync")
-                    try syncBeforeReplace.run()
-                    syncBeforeReplace.waitUntilExit()
-                    
-                    // Now replace the original with the optimized version
-                    try FileManager.default.removeItem(at: diskImgPath)
-                    try FileManager.default.moveItem(at: URL(fileURLWithPath: optimizedPath), to: diskImgPath)
-                    Logger.info("Replaced with optimized sparse version")
-                    
-                    // Additional sync after replacement
-                    let syncAfterReplace = Process()
-                    syncAfterReplace.executableURL = URL(fileURLWithPath: "/bin/sync")
-                    try syncAfterReplace.run()
-                    syncAfterReplace.waitUntilExit()
-                } else {
-                    Logger.info("Sparse optimization failed, using original file")
-                    try? FileManager.default.removeItem(atPath: optimizedPath)
-                }
-            } catch {
-                Logger.info("Error during sparse optimization: \(error.localizedDescription)")
-                try? FileManager.default.removeItem(atPath: optimizedPath)
-            }
-        }
-        
-        // 10. Explicitly set permissions to match cache hit (0644)
-        let chmodProcess = Process()
-        chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
-        chmodProcess.arguments = ["0644", diskImgPath.path]
-        try chmodProcess.run()
-        chmodProcess.waitUntilExit()
-        
-        // 11. Final sync to ensure all data is flushed to disk
-        let syncProcess = Process()
-        syncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
-        try syncProcess.run()
-        syncProcess.waitUntilExit()
-        
-        // One more filesystem sync for good measure
-        let finalSyncProcess = Process()
-        finalSyncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
-        try finalSyncProcess.run()
-        finalSyncProcess.waitUntilExit()
-        
-        // Wait a moment for final filesystem operations
-        Thread.sleep(forTimeInterval: 0.5)
-        
-        // 12. Clean up the backup file
-        try FileManager.default.removeItem(at: backupPath)
-        
-        Logger.info("Cache pull simulation completed successfully")
     }
 
     private func getToken(repository: String) async throws -> String {
