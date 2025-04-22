@@ -948,45 +948,10 @@ class ImageContainerRegistry: @unchecked Sendable {
                 Logger.info("Using copyFromCache method to properly preserve partition tables")
                 try await copyFromCache(manifest: manifest, manifestId: manifestId, to: tempVMDir)
             } else {
-                // If caching is disabled, just copy files directly to tempVMDir
-                Logger.info("Caching disabled - copying downloaded files directly to VM directory")
-
-                // Copy non-disk files first
-                for file in ["config.json", "nvram.bin"] {
-                    let sourceURL = tempDownloadDir.appendingPathComponent(file)
-                    if FileManager.default.fileExists(atPath: sourceURL.path) {
-                        try FileManager.default.copyItem(
-                            at: sourceURL,
-                            to: tempVMDir.appendingPathComponent(file)
-                        )
-                    }
-                }
-
-                // For the disk image, we have two cases - either a single file or parts
-                let diskURL = tempDownloadDir.appendingPathComponent("disk.img")
-                if FileManager.default.fileExists(atPath: diskURL.path) {
-                    // Single file disk image
-                    try FileManager.default.copyItem(
-                        at: diskURL,
-                        to: tempVMDir.appendingPathComponent("disk.img")
-                    )
-                    Logger.info("Copied single disk.img file to VM directory")
-                } else {
-                    // Multiple parts case - use the partitioned disk.img from reassembly
-                    let diskParts = await diskPartsCollector.getSortedParts()
-                    if !diskParts.isEmpty {
-                        Logger.info("Using most recently assembled disk image for VM")
-                        let assembledDiskURL = tempVMDir.appendingPathComponent("disk.img")
-                        if FileManager.default.fileExists(atPath: assembledDiskURL.path) {
-                            Logger.info("Assembled disk.img already exists in VM directory")
-                        } else {
-                            Logger.error(
-                                "Could not find assembled disk image - VM may not boot properly")
-                        }
-                    } else {
-                        Logger.error("No disk image found - VM may not boot properly")
-                    }
-                }
+                // Even if caching is disabled, we need to use copyFromCache to assemble the disk image
+                // correctly with partition tables, then we'll clean up the cache afterward
+                Logger.info("Caching disabled - using temporary cache to assemble VM files")
+                try await copyFromCache(manifest: manifest, manifestId: manifestId, to: tempVMDir)
             }
         }
 
