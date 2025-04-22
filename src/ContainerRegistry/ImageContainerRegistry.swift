@@ -1350,21 +1350,131 @@ class ImageContainerRegistry: @unchecked Sendable {
             return
         }
         
-        Logger.info("Creating sparse file with size: \(ByteCountFormatter.string(fromByteCount: Int64(diskSize), countStyle: .file))")
+        Logger.info("Creating disk image clone with partition table preserved...")
         
         // Create backup of original file
         let backupPath = tempVMDir.appendingPathComponent("disk.img.original")
         try FileManager.default.moveItem(at: diskImgPath, to: backupPath)
         
-        // Use shared function to create the disk image
-        try createDiskImageFromSource(
-            sourceURL: backupPath,
-            destinationURL: diskImgPath,
-            diskSize: diskSize
-        )
+        // We'll use macOS's built-in disk cloning capabilities to preserve partition information
+        // First, create an empty sparse file with the target size
+        guard FileManager.default.createFile(atPath: diskImgPath.path, contents: nil) else {
+            // If creation fails, restore the original
+            try? FileManager.default.moveItem(at: backupPath, to: diskImgPath)
+            throw PullError.fileCreationFailed(diskImgPath.path)
+        }
         
-        // Clean up backup
+        // Use dd to clone the disk with partition table preserved
+        Logger.info("Cloning disk with partition table using dd...")
+        let ddProcess = Process()
+        ddProcess.executableURL = URL(fileURLWithPath: "/bin/dd")
+        ddProcess.arguments = [
+            "if=\(backupPath.path)",
+            "of=\(diskImgPath.path)",
+            "bs=4m",     // Use a large block size for efficiency
+            "conv=sparse" // Ensure sparse file creation
+        ]
+        
+        // Capture and log output/errors
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        ddProcess.standardOutput = outputPipe
+        ddProcess.standardError = errorPipe
+        
+        try ddProcess.run()
+        ddProcess.waitUntilExit()
+        
+        // Log command output/errors
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        
+        if let errorOutput = String(data: errorData, encoding: .utf8), !errorOutput.isEmpty {
+            Logger.info("dd command output: \(errorOutput)")
+        }
+        
+        if ddProcess.terminationStatus != 0 {
+            Logger.error("dd command failed with status \(ddProcess.terminationStatus)")
+            // If dd fails, try to restore the original
+            if FileManager.default.fileExists(atPath: diskImgPath.path) {
+                try? FileManager.default.removeItem(at: diskImgPath)
+            }
+            try? FileManager.default.moveItem(at: backupPath, to: diskImgPath)
+            throw PullError.fileCreationFailed("dd command failed")
+        }
+        
+        // Sync filesystem to ensure all changes are written
+        let syncProcess = Process()
+        syncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
+        try syncProcess.run()
+        syncProcess.waitUntilExit()
+        
+        // Optimize with cp -c to ensure best sparse file representation
+        if FileManager.default.fileExists(atPath: "/bin/cp") {
+            Logger.info("Optimizing sparse file representation...")
+            let optimizedPath = diskImgPath.path + ".optimized"
+            
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/cp")
+            process.arguments = ["-c", diskImgPath.path, optimizedPath]
+            
+            try process.run()
+            process.waitUntilExit()
+            
+            if process.terminationStatus == 0 {
+                let optimizedSize = (try? FileManager.default.attributesOfItem(atPath: optimizedPath)[.size] as? UInt64) ?? 0
+                let originalUsage = getActualDiskUsage(path: diskImgPath.path)
+                let optimizedUsage = getActualDiskUsage(path: optimizedPath)
+                
+                Logger.info(
+                    "Sparse optimization results: Before: \(ByteCountFormatter.string(fromByteCount: Int64(originalUsage), countStyle: .file)) actual usage, After: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedUsage), countStyle: .file)) actual usage (Apparent size: \(ByteCountFormatter.string(fromByteCount: Int64(optimizedSize), countStyle: .file)))"
+                )
+                
+                // Replace with optimized version
+                try FileManager.default.removeItem(at: diskImgPath)
+                try FileManager.default.moveItem(at: URL(fileURLWithPath: optimizedPath), to: diskImgPath)
+                Logger.info("Replaced with optimized sparse version")
+            } else {
+                Logger.info("Sparse optimization failed, using original file")
+                try? FileManager.default.removeItem(atPath: optimizedPath)
+            }
+        }
+        
+        // Set permissions to 0644
+        let chmodProcess = Process()
+        chmodProcess.executableURL = URL(fileURLWithPath: "/bin/chmod")
+        chmodProcess.arguments = ["0644", diskImgPath.path]
+        try chmodProcess.run()
+        chmodProcess.waitUntilExit()
+        
+        // Final sync
+        let finalSyncProcess = Process()
+        finalSyncProcess.executableURL = URL(fileURLWithPath: "/bin/sync")
+        try finalSyncProcess.run()
+        finalSyncProcess.waitUntilExit()
+        
+        // Clean up backup file
         try FileManager.default.removeItem(at: backupPath)
+        
+        Logger.info("Verifying final disk image partition information...")
+        // Use hdiutil to verify partition information (output only for debugging)
+        let verifyProcess = Process()
+        verifyProcess.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        verifyProcess.arguments = ["imageinfo", diskImgPath.path]
+        
+        let verifyOutputPipe = Pipe()
+        verifyProcess.standardOutput = verifyOutputPipe
+        
+        try verifyProcess.run()
+        verifyProcess.waitUntilExit()
+        
+        let verifyOutputData = verifyOutputPipe.fileHandleForReading.readDataToEndOfFile()
+        if let verifyOutput = String(data: verifyOutputData, encoding: .utf8), verifyProcess.terminationStatus == 0 {
+            // Extract just the partition scheme information for logging
+            if let partitionSchemeRange = verifyOutput.range(of: "partition-scheme: .*", options: .regularExpression) {
+                let partitionScheme = verifyOutput[partitionSchemeRange]
+                Logger.info("Disk image partition scheme: \(partitionScheme)")
+            }
+        }
         
         Logger.info("Cache pull simulation completed successfully")
     }
