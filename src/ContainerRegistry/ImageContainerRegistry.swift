@@ -677,7 +677,8 @@ class ImageContainerRegistry: @unchecked Sendable {
 
         // Get anonymous token
         Logger.info("Getting registry authentication token")
-        let token = try await getToken(repository: "\(self.organization)/\(imageName)")
+        let token = try await getToken(
+            repository: "\(self.organization)/\(imageName)", scopes: ["pull"])
 
         // Fetch manifest
         Logger.info("Fetching Image manifest")
@@ -1400,14 +1401,14 @@ class ImageContainerRegistry: @unchecked Sendable {
         async throws
     {
         Logger.info("Copying from cache...")
-        
+
         // Define output URL and expected size variable scope here
         let outputURL = destination.appendingPathComponent("disk.img")
-        var expectedTotalSize: UInt64? = nil // Use optional to handle missing config
+        var expectedTotalSize: UInt64? = nil  // Use optional to handle missing config
 
         // Instantiate collector
         let diskPartsCollector = DiskPartsCollector()
-        var lz4LayerCount = 0 // Count lz4 layers found
+        var lz4LayerCount = 0  // Count lz4 layers found
 
         // First identify disk parts and non-disk files
         for layer in manifest.layers {
@@ -1415,21 +1416,22 @@ class ImageContainerRegistry: @unchecked Sendable {
 
             // Identify disk parts simply by media type
             if layer.mediaType == "application/octet-stream+lz4" {
-                 lz4LayerCount += 1 // Increment count
-                 
-                 // When caching is disabled, the file might not exist with the cache path name
-                 // Check if the file exists before trying to use it
-                 if !FileManager.default.fileExists(atPath: cachedLayer.path) {
-                     Logger.info("Layer file not found in cache: \(cachedLayer.path) - skipping")
-                     continue
-                 }
-                 
-                 // Add to collector. It will assign the sequential part number.
-                 let collectorPartNum = await diskPartsCollector.addPart(url: cachedLayer) 
-                 Logger.info("Adding cached lz4 layer (part \(lz4LayerCount)) -> Collector #\(collectorPartNum): \(cachedLayer.lastPathComponent)")
-            }
-            else {
-                 // --- Handle Non-Disk-Part Layer (from cache) ---
+                lz4LayerCount += 1  // Increment count
+
+                // When caching is disabled, the file might not exist with the cache path name
+                // Check if the file exists before trying to use it
+                if !FileManager.default.fileExists(atPath: cachedLayer.path) {
+                    Logger.info("Layer file not found in cache: \(cachedLayer.path) - skipping")
+                    continue
+                }
+
+                // Add to collector. It will assign the sequential part number.
+                let collectorPartNum = await diskPartsCollector.addPart(url: cachedLayer)
+                Logger.info(
+                    "Adding cached lz4 layer (part \(lz4LayerCount)) -> Collector #\(collectorPartNum): \(cachedLayer.lastPathComponent)"
+                )
+            } else {
+                // --- Handle Non-Disk-Part Layer (from cache) ---
                 let fileName: String
                 switch layer.mediaType {
                 case "application/vnd.oci.image.config.v1+json":
@@ -1437,21 +1439,22 @@ class ImageContainerRegistry: @unchecked Sendable {
                 case "application/octet-stream":
                     // Assume nvram if config layer exists, otherwise assume single disk image
                     fileName = manifest.config != nil ? "nvram.bin" : "disk.img"
-                case "application/vnd.oci.image.layer.v1.tar", 
-                     "application/octet-stream+gzip":
-                     // Assume disk image for these types as well if encountered in cache scenario
-                     fileName = "disk.img"
+                case "application/vnd.oci.image.layer.v1.tar",
+                    "application/octet-stream+gzip":
+                    // Assume disk image for these types as well if encountered in cache scenario
+                    fileName = "disk.img"
                 default:
-                     Logger.info("Skipping unsupported cached layer media type: \(layer.mediaType)")
+                    Logger.info("Skipping unsupported cached layer media type: \(layer.mediaType)")
                     continue
                 }
-                
+
                 // When caching is disabled, the file might not exist with the cache path name
                 if !FileManager.default.fileExists(atPath: cachedLayer.path) {
-                    Logger.info("Non-disk layer file not found in cache: \(cachedLayer.path) - skipping")
+                    Logger.info(
+                        "Non-disk layer file not found in cache: \(cachedLayer.path) - skipping")
                     continue
                 }
-                
+
                 // Copy the non-disk file directly from cache to destination
                 try FileManager.default.copyItem(
                     at: cachedLayer,
@@ -1691,51 +1694,45 @@ class ImageContainerRegistry: @unchecked Sendable {
         Logger.info("Cache copy complete")
     }
 
-    private func getToken(repository: String) async throws -> String {
-        let encodedRepo =
-            repository.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? repository
-        // Request both pull and push scope for uploads
+    private func getToken(repository: String, scopes: [String] = ["pull", "push"]) async throws
+        -> String
+    {
+        let encodedRepo = repository.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed)!
+
+        // Build scope string from scopes array
+        let scopeString = scopes.joined(separator: ",")
+
         let url = URL(
             string:
-                "https://\(self.registry)/token?scope=repository:\(encodedRepo):pull,push&service=\(self.registry)"
+                "https://\(self.registry)/token?scope=repository:\(encodedRepo):\(scopeString)&service=\(self.registry)"
         )!
 
         var request = URLRequest(url: url)
-        request.httpMethod = "GET"  // Token endpoint uses GET
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpMethod = "GET"
 
-        // *** Add Basic Authentication Header if credentials exist ***
-        let (username, password) = getCredentialsFromEnvironment()
-        if let username = username, let password = password, !username.isEmpty, !password.isEmpty {
-            let authString = "\(username):\(password)"
-            if let authData = authString.data(using: .utf8) {
-                let base64Auth = authData.base64EncodedString()
-                request.setValue("Basic \(base64Auth)", forHTTPHeaderField: "Authorization")
-                Logger.info("Adding Basic Authentication header to token request.")
-            } else {
-                Logger.error("Failed to encode credentials for Basic Auth.")
+        let session = URLSession.shared
+        let (data, response) = try await session.data(for: request)
+
+        if let httpResponse = response as? HTTPURLResponse {
+            if httpResponse.statusCode != 200 {
+                // If we get 403 and we're requesting both pull and push, retry with just pull
+                if httpResponse.statusCode == 403 && scopes.contains("push")
+                    && scopes.contains("pull")
+                {
+                    return try await getToken(repository: repository, scopes: ["pull"])
+                }
+
+                // For pull scope only, if authentication fails, assume this is a public image
+                // and continue without a token (empty string)
+                if scopes == ["pull"] {
+                    Logger.info(
+                        "Authentication failed for pull scope, assuming public image and continuing without token"
+                    )
+                    return ""
+                }
+
+                throw PushError.authenticationFailed
             }
-        } else {
-            Logger.info("No credentials found in environment for token request.")
-            // Allow anonymous request for pull scope, but push scope likely requires auth
-        }
-        // *** End Basic Auth addition ***
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        // Check response status code *before* parsing JSON
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw PushError.authenticationFailed  // Or a more generic network error
-        }
-
-        guard httpResponse.statusCode == 200 else {
-            // Log detailed error including status code and potentially response body
-            let responseBody = String(data: data, encoding: .utf8) ?? "(Could not decode body)"
-            Logger.error(
-                "Token request failed with status code: \(httpResponse.statusCode). Response: \(responseBody)"
-            )
-            // Throw specific error based on status if needed (e.g., 401 for unauthorized)
-            throw PushError.authenticationFailed
         }
 
         let jsonResponse = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -1755,7 +1752,12 @@ class ImageContainerRegistry: @unchecked Sendable {
     ) {
         var request = URLRequest(
             url: URL(string: "https://\(self.registry)/v2/\(repository)/manifests/\(tag)")!)
-        request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        // Only add Authorization header if token is not empty
+        if !token.isEmpty {
+            request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
         request.addValue("application/vnd.oci.image.manifest.v1+json", forHTTPHeaderField: "Accept")
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -1808,7 +1810,12 @@ class ImageContainerRegistry: @unchecked Sendable {
             do {
                 var request = URLRequest(
                     url: URL(string: "https://\(self.registry)/v2/\(repository)/blobs/\(digest)")!)
-                request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+                // Only add Authorization header if token is not empty
+                if !token.isEmpty {
+                    request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                }
+
                 request.addValue(mediaType, forHTTPHeaderField: "Accept")
                 request.timeoutInterval = 60
 
@@ -1838,7 +1845,7 @@ class ImageContainerRegistry: @unchecked Sendable {
                         at: cachedLayer.deletingLastPathComponent(),
                         withIntermediateDirectories: true
                     )
-                    
+
                     if FileManager.default.fileExists(atPath: cachedLayer.path) {
                         try FileManager.default.removeItem(at: cachedLayer)
                     }
