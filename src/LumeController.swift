@@ -403,24 +403,32 @@ final class LumeController {
             var actualImage = image
             var actualName = name
 
-            // Check if image is a non-sparse version (doesn't contain -sparse)
+            // Split the image to get name and tag for both sparse and non-sparse cases
+            let components = image.split(separator: ":")
+            guard components.count == 2 else {
+                throw ValidationError("Invalid image format. Expected format: name:tag")
+            }
+
+            let originalName = String(components[0])
+            let tag = String(components[1])
+
+            // For consistent VM naming, strip "-sparse" suffix if present when no name provided
+            let normalizedBaseName: String
+            if originalName.hasSuffix("-sparse") {
+                normalizedBaseName = String(originalName.dropLast(7))  // drop "-sparse"
+            } else {
+                normalizedBaseName = originalName
+            }
+
+            // Set default VM name if not provided
+            if actualName == nil {
+                actualName = "\(normalizedBaseName)_\(tag)"
+            }
+
+            // Convert non-sparse image to sparse version if needed
             if !image.contains("-sparse") {
-                // Split the image to get name and tag
-                let components = image.split(separator: ":")
-                guard components.count == 2 else {
-                    throw ValidationError("Invalid image format. Expected format: name:tag")
-                }
-
-                let originalName = String(components[0])
-                let tag = String(components[1])
-
                 // Create sparse version of the image name
                 actualImage = "\(originalName)-sparse:\(tag)"
-
-                // If name wasn't explicitly provided, use the original image name (without -sparse)
-                if actualName == nil {
-                    actualName = originalName
-                }
 
                 Logger.info(
                     "Converting to sparse image",
@@ -432,13 +440,13 @@ final class LumeController {
                 )
             }
 
-            let vmName: String = actualName ?? normalizeVMName(name: actualImage)
+            let vmName = actualName ?? "default"  // Just use actualName as it's already normalized
 
             Logger.info(
                 "Pulling image",
                 metadata: [
                     "image": actualImage,
-                    "name": actualName ?? "default",
+                    "name": vmName,
                     "registry": registry,
                     "organization": organization,
                     "location": storage ?? "default",
@@ -753,7 +761,7 @@ final class LumeController {
             throw ValidationError("Unsupported OS type: \(os)")
         }
 
-        let vmDir = try home.getVMDirectory(name, storage: storage)
+        let vmDir: VMDirectory = try home.getVMDirectory(name, storage: storage)
         if vmDir.exists() {
             throw VMError.alreadyExists(name)
         }
