@@ -1011,6 +1011,12 @@ class ImageContainerRegistry: @unchecked Sendable {
         // Move files to final location
         try FileManager.default.moveItem(at: tempVMDir, to: URL(fileURLWithPath: vmDir.dir.path))
 
+        // If caching is disabled, clean up the cache entry
+        if !cachingEnabled {
+            Logger.info("Caching disabled - cleaning up temporary cache entry")
+            try? cleanupCacheEntry(manifestId: manifestId)
+        }
+
         Logger.info("Download complete: Files extracted to \(vmDir.dir.path)")
         Logger.info(
             "Note: Actual disk usage is significantly lower than reported size due to macOS sparse file system"
@@ -1018,6 +1024,16 @@ class ImageContainerRegistry: @unchecked Sendable {
         Logger.info(
             "Run 'lume run \(vmName)' to reduce the disk image file size by using macOS sparse file system"
         )
+    }
+
+    // Helper function to clean up a specific cache entry
+    private func cleanupCacheEntry(manifestId: String) throws {
+        let cacheDir = getImageCacheDirectory(manifestId: manifestId)
+
+        if FileManager.default.fileExists(atPath: cacheDir.path) {
+            Logger.info("Removing cache entry for manifest ID: \(manifestId)")
+            try FileManager.default.removeItem(at: cacheDir)
+        }
     }
 
     // Shared function to handle disk image creation - can be used by both cache hit and cache miss paths
