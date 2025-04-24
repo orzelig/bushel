@@ -161,9 +161,9 @@ For the security of your VM, change the default password `lume` immediately afte
 
 | Image | Tag | Description | Logical Size |
 |-------|------------|-------------|------|
-| `macos-sequoia-vanilla-sparse` | `latest`, `15.2` | macOS Sequoia 15.2 image | 40GB |
-| `macos-sequoia-xcode-sparse` | `latest`, `15.2` | macOS Sequoia 15.2 image with Xcode command line tools | 50GB |
-| `macos-sequoia-cua-sparse` | `latest`, `15.3` | macOS Sequoia 15.3 image compatible with the Computer interface | 80GB |
+| `macos-sequoia-vanilla-sparse` | `latest`, `15.2` | macOS Sequoia 15.2 image | 20GB |
+| `macos-sequoia-xcode-sparse` | `latest`, `15.2` | macOS Sequoia 15.2 image with Xcode command line tools | 22GB |
+| `macos-sequoia-cua-sparse` | `latest`, `15.3` | macOS Sequoia 15.3 image compatible with the Computer interface | 24GB |
 | `ubuntu-noble-vanilla-sparse` | `latest`, `24.04.1` | [Ubuntu Server for ARM 24.04.1 LTS](https://ubuntu.com/download/server/arm) with Ubuntu Desktop | 20GB |
 
 For additional disk space, resize the VM disk after pulling the image using the `lume set <name> --disk-size <size>` command. Note that the actual disk space used by sparse images will be much lower than the logical size listed.
