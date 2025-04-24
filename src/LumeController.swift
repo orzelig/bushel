@@ -82,6 +82,28 @@ final class LumeController {
             // Validate source VM exists
             _ = try self.validateVMExists(normalizedName, storage: sourceLocation)
 
+            // Get the source VM and check if it's running
+            let sourceVM = try get(name: normalizedName, storage: sourceLocation)
+            if sourceVM.details.status == "running" {
+                Logger.error("Cannot clone a running VM", metadata: ["source": normalizedName])
+                throw VMError.alreadyRunning(normalizedName)
+            }
+
+            // Check if destination already exists
+            do {
+                let destDir = try home.getVMDirectory(normalizedNewName, storage: destLocation)
+                if destDir.exists() {
+                    Logger.error(
+                        "Destination VM already exists",
+                        metadata: ["destination": normalizedNewName])
+                    throw HomeError.directoryAlreadyExists(path: destDir.dir.path)
+                }
+            } catch VMLocationError.locationNotFound {
+                // Location not found is okay, we'll create it
+            } catch VMError.notFound {
+                // VM not found is okay, we'll create it
+            }
+
             // Copy the VM directory
             try home.copyVMDirectory(
                 from: normalizedName,
@@ -93,9 +115,10 @@ final class LumeController {
             // Update MAC address in the cloned VM to ensure uniqueness
             let clonedVM = try get(name: normalizedNewName, storage: destLocation)
             try clonedVM.setMacAddress(VZMACAddress.randomLocallyAdministered().string)
-            
+
             // Update MAC Identifier in the cloned VM to ensure uniqueness
-            try clonedVM.setMachineIdentifier(DarwinVirtualizationService.generateMachineIdentifier())
+            try clonedVM.setMachineIdentifier(
+                DarwinVirtualizationService.generateMachineIdentifier())
 
             Logger.info(
                 "VM cloned successfully",

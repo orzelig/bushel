@@ -158,7 +158,8 @@ final class Home {
         let sourceDir = try getVMDirectory(sourceName, storage: sourceLocation)
         let destDir = try getVMDirectory(destName, storage: destLocation)
 
-        if destDir.initialized() {
+        // Check if destination directory exists at all
+        if destDir.exists() {
             throw HomeError.directoryAlreadyExists(path: destDir.dir.path)
         }
 
