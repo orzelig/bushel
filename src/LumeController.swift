@@ -93,6 +93,9 @@ final class LumeController {
             // Update MAC address in the cloned VM to ensure uniqueness
             let clonedVM = try get(name: normalizedNewName, storage: destLocation)
             try clonedVM.setMacAddress(VZMACAddress.randomLocallyAdministered().string)
+            
+            // Update MAC Identifier in the cloned VM to ensure uniqueness
+            try clonedVM.setMachineIdentifier(DarwinVirtualizationService.generateMachineIdentifier())
 
             Logger.info(
                 "VM cloned successfully",
