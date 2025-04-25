@@ -1695,7 +1695,9 @@ class ImageContainerRegistry: @unchecked Sendable {
         Logger.info("Cache copy complete")
     }
 
-    private func getToken(repository: String, scopes: [String] = ["pull"]) async throws
+    private func getToken(
+        repository: String, scopes: [String] = ["pull"], requireAllScopes: Bool = false
+    ) async throws
         -> String
     {
         let encodedRepo = repository.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed)!
@@ -1719,11 +1721,42 @@ class ImageContainerRegistry: @unchecked Sendable {
         if let httpResponse = response as? HTTPURLResponse {
             if httpResponse.statusCode != 200 {
                 // If we get 403 and we're requesting both pull and push, retry with just pull
+                // ONLY if requireAllScopes is false
                 if httpResponse.statusCode == 403 && scopes.contains("push")
-                    && scopes.contains("pull")
+                    && scopes.contains("pull") && !requireAllScopes
                 {
                     Logger.info("Permission denied for push scope, retrying with pull scope only")
                     return try await getToken(repository: repository, scopes: ["pull"])
+                }
+
+                // Special handling for push operations
+                if requireAllScopes && httpResponse.statusCode == 403 {
+                    // Try to parse the error message from the response
+                    let errorResponse =
+                        try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                    let errors = errorResponse?["errors"] as? [[String: Any]]
+                    let errorMessage = errors?.first?["message"] as? String ?? "Permission denied"
+
+                    Logger.error("Push permission denied: \(errorMessage)")
+                    Logger.error(
+                        "Your token does not have 'packages:write' permission to \(repository)")
+                    Logger.error(
+                        "Make sure you have the appropriate access rights to the repository")
+
+                    // Check if this is an organization repository
+                    if repository.contains("/") {
+                        let orgName = repository.split(separator: "/").first.map(String.init) ?? ""
+                        if orgName != "" {
+                            Logger.error("For organization repositories (\(orgName)), you must:")
+                            Logger.error("1. Be a member of the organization with write access")
+                            Logger.error("2. Have a token with 'write:packages' scope")
+                            Logger.error(
+                                "3. The organization must allow you to create/publish packages")
+                        }
+                    }
+
+                    throw PushError.insufficientPermissions(
+                        "Push permission denied: \(errorMessage)")
                 }
 
                 // Check for authentication issues with better logging
@@ -2577,7 +2610,8 @@ class ImageContainerRegistry: @unchecked Sendable {
             Logger.info("Getting registry authentication token")
             token = try await getToken(
                 repository: "\(self.organization)/\(imageName)",
-                scopes: ["pull", "push"])  // Explicitly specify both pull and push scopes
+                scopes: ["pull", "push"],
+                requireAllScopes: true)  // Require push scope, don't fall back to pull-only
         } else {
             Logger.info("Dry run mode: skipping authentication token request")
         }
