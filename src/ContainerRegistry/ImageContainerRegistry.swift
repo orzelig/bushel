@@ -1700,95 +1700,104 @@ class ImageContainerRegistry: @unchecked Sendable {
     ) async throws
         -> String
     {
-        let encodedRepo = repository.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed)!
+        let encodedRepo =
+            repository.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? repository
 
         // Build scope string from scopes array
         let scopeString = scopes.joined(separator: ",")
 
         Logger.info("Requesting token with scopes: \(scopeString) for repository: \(repository)")
 
+        // Request both pull and push scope for uploads
         let url = URL(
             string:
                 "https://\(self.registry)/token?scope=repository:\(encodedRepo):\(scopeString)&service=\(self.registry)"
         )!
 
         var request = URLRequest(url: url)
-        request.httpMethod = "GET"
+        request.httpMethod = "GET"  // Token endpoint uses GET
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        let session = URLSession.shared
-        let (data, response) = try await session.data(for: request)
-
-        if let httpResponse = response as? HTTPURLResponse {
-            if httpResponse.statusCode != 200 {
-                // If we get 403 and we're requesting both pull and push, retry with just pull
-                // ONLY if requireAllScopes is false
-                if httpResponse.statusCode == 403 && scopes.contains("push")
-                    && scopes.contains("pull") && !requireAllScopes
-                {
-                    Logger.info("Permission denied for push scope, retrying with pull scope only")
-                    return try await getToken(repository: repository, scopes: ["pull"])
-                }
-
-                // Special handling for push operations
-                if requireAllScopes && httpResponse.statusCode == 403 {
-                    // Try to parse the error message from the response
-                    let errorResponse =
-                        try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                    let errors = errorResponse?["errors"] as? [[String: Any]]
-                    let errorMessage = errors?.first?["message"] as? String ?? "Permission denied"
-
-                    Logger.error("Push permission denied: \(errorMessage)")
-                    Logger.error(
-                        "Your token does not have 'packages:write' permission to \(repository)")
-                    Logger.error(
-                        "Make sure you have the appropriate access rights to the repository")
-
-                    // Check if this is an organization repository
-                    if repository.contains("/") {
-                        let orgName = repository.split(separator: "/").first.map(String.init) ?? ""
-                        if orgName != "" {
-                            Logger.error("For organization repositories (\(orgName)), you must:")
-                            Logger.error("1. Be a member of the organization with write access")
-                            Logger.error("2. Have a token with 'write:packages' scope")
-                            Logger.error(
-                                "3. The organization must allow you to create/publish packages")
-                        }
-                    }
-
-                    throw PushError.insufficientPermissions(
-                        "Push permission denied: \(errorMessage)")
-                }
-
-                // Check for authentication issues with better logging
-                if httpResponse.statusCode == 401 {
-                    // Try to parse the error message from the response
-                    let errorResponse =
-                        try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                    let errors = errorResponse?["errors"] as? [[String: Any]]
-                    let errorMessage =
-                        errors?.first?["message"] as? String ?? "Unknown authentication error"
-
-                    Logger.error("Authentication failed: \(errorMessage)")
-                    Logger.error(
-                        "Make sure GITHUB_USERNAME and GITHUB_TOKEN environment variables are set correctly"
-                    )
-                    Logger.error(
-                        "Your token must have 'packages:read' and 'packages:write' permissions")
-
-                    throw PushError.insufficientPermissions(errorMessage)
-                }
-
-                // For pull scope only, if authentication fails, assume this is a public image
-                // and continue without a token (empty string)
-                if scopes == ["pull"] {
-                    Logger.info(
-                        "Authentication failed for pull scope, assuming public image and continuing without token"
-                    )
-                    return ""
-                }
-
-                throw PushError.authenticationFailed
+        // *** Add Basic Authentication Header if credentials exist ***
+        let (username, password) = getCredentialsFromEnvironment()
+        if let username = username, let password = password, !username.isEmpty, !password.isEmpty {
+            let authString = "\(username):\(password)"
+            if let authData = authString.data(using: .utf8) {
+                let base64Auth = authData.base64EncodedString()
+                request.setValue("Basic \(base64Auth)", forHTTPHeaderField: "Authorization")
+                Logger.info("Adding Basic Authentication header to token request")
+            } else {
+                Logger.error("Failed to encode credentials for Basic Auth")
             }
+        } else {
+            Logger.info("No credentials found in environment for token request")
+            // Allow anonymous request for pull scope, but push scope likely requires auth
+        }
+        // *** End Basic Auth addition ***
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        // Check response status code *before* parsing JSON
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw PushError.authenticationFailed  // Or a more generic network error
+        }
+
+        // Handle errors based on status code
+        if httpResponse.statusCode != 200 {
+            // Special handling for push operations that require all scopes
+            if requireAllScopes
+                && (httpResponse.statusCode == 401 || httpResponse.statusCode == 403)
+            {
+                // Try to parse the error message from the response
+                let errorResponse = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let errors = errorResponse?["errors"] as? [[String: Any]]
+                let errorMessage = errors?.first?["message"] as? String ?? "Permission denied"
+
+                Logger.error("Push permission denied: \(errorMessage)")
+                Logger.error(
+                    "Your token does not have 'packages:write' permission to \(repository)")
+                Logger.error("Make sure you have the appropriate access rights to the repository")
+
+                // Check if this is an organization repository
+                if repository.contains("/") {
+                    let orgName = repository.split(separator: "/").first.map(String.init) ?? ""
+                    if orgName != "" {
+                        Logger.error("For organization repositories (\(orgName)), you must:")
+                        Logger.error("1. Be a member of the organization with write access")
+                        Logger.error("2. Have a token with 'write:packages' scope")
+                        Logger.error(
+                            "3. The organization must allow you to create/publish packages")
+                    }
+                }
+
+                throw PushError.insufficientPermissions("Push permission denied: \(errorMessage)")
+            }
+
+            // If we get 403 and we're requesting both pull and push, retry with just pull
+            // ONLY if requireAllScopes is false
+            if httpResponse.statusCode == 403 && scopes.contains("push")
+                && scopes.contains("pull") && !requireAllScopes
+            {
+                Logger.info("Permission denied for push scope, retrying with pull scope only")
+                return try await getToken(repository: repository, scopes: ["pull"])
+            }
+
+            // For pull scope only, if authentication fails, assume this is a public image
+            // and continue without a token (empty string)
+            if scopes == ["pull"] {
+                Logger.info(
+                    "Authentication failed for pull scope, assuming public image and continuing without token"
+                )
+                return ""
+            }
+
+            // Handle other authentication failures
+            let responseBody = String(data: data, encoding: .utf8) ?? "(Could not decode body)"
+            Logger.error(
+                "Token request failed with status code: \(httpResponse.statusCode). Response: \(responseBody)"
+            )
+
+            throw PushError.authenticationFailed
         }
 
         let jsonResponse = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -1796,7 +1805,7 @@ class ImageContainerRegistry: @unchecked Sendable {
             let token = jsonResponse?["token"] as? String ?? jsonResponse?["access_token"]
                 as? String
         else {
-            Logger.error("Token not found in registry response.")
+            Logger.error("Token not found in registry response")
             throw PushError.missingToken
         }
 
