@@ -10,25 +10,75 @@ NORMAL=$(tput sgr0)
 RED=$(tput setaf 1)
 GREEN=$(tput setaf 2)
 BLUE=$(tput setaf 4)
+YELLOW=$(tput setaf 3)
 
-# Default installation directory
-DEFAULT_INSTALL_DIR="/usr/local/bin"
+# Default installation directory (user-specific, doesn't require sudo)
+DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
 
 # GitHub info
 GITHUB_REPO="trycua/cua"
 LATEST_RELEASE_URL="https://api.github.com/repos/$GITHUB_REPO/releases/latest"
 
+# Parse command line arguments
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --install-dir=*)
+      INSTALL_DIR="${1#*=}"
+      ;;
+    --help)
+      echo "${BOLD}${BLUE}Lume Installer${NORMAL}"
+      echo "Usage: $0 [OPTIONS]"
+      echo ""
+      echo "Options:"
+      echo "  --install-dir=DIR   Install to the specified directory (default: $DEFAULT_INSTALL_DIR)"
+      echo "  --help              Display this help message"
+      echo ""
+      echo "Examples:"
+      echo "  $0                               # Install to $DEFAULT_INSTALL_DIR"
+      echo "  $0 --install-dir=/usr/local/bin  # Install to system directory (may require root privileges)"
+      echo "  INSTALL_DIR=/opt/lume $0         # Install to /opt/lume (legacy env var support)"
+      exit 0
+      ;;
+    *)
+      echo "${RED}Unknown option: $1${NORMAL}"
+      echo "Use --help for usage information"
+      exit 1
+      ;;
+  esac
+  shift
+done
+
 echo "${BOLD}${BLUE}Lume Installer${NORMAL}"
 echo "This script will install Lume to your system."
 
 # Check if we're running with appropriate permissions
 check_permissions() {
-  if [ "$INSTALL_DIR" = "$DEFAULT_INSTALL_DIR" ] && [ "$(id -u)" != "0" ]; then
-    echo "${RED}Error: Installing to $INSTALL_DIR requires root privileges.${NORMAL}"
-    echo "Please run with sudo or specify a different directory with INSTALL_DIR environment variable."
-    echo "Example: INSTALL_DIR=\$HOME/.local/bin $0"
-    exit 1
+  # System directories that typically require root privileges
+  SYSTEM_DIRS=("/usr/local/bin" "/usr/bin" "/bin" "/opt")
+  
+  NEEDS_ROOT=false
+  for DIR in "${SYSTEM_DIRS[@]}"; do
+    if [[ "$INSTALL_DIR" == "$DIR"* ]] && [ ! -w "$INSTALL_DIR" ]; then
+      NEEDS_ROOT=true
+      break
+    fi
+  done
+  
+  if [ "$NEEDS_ROOT" = true ]; then
+    echo "${YELLOW}Warning: Installing to $INSTALL_DIR may require root privileges.${NORMAL}"
+    echo "Consider these alternatives:"
+    echo "  • Install to a user-writable location: $0 --install-dir=$HOME/.local/bin"
+    echo "  • Create the directory with correct permissions first:"
+    echo "    sudo mkdir -p $INSTALL_DIR && sudo chown $(whoami) $INSTALL_DIR"
+    echo ""
+    
+    # Check if we already have write permission (might have been set up previously)
+    if [ ! -w "$INSTALL_DIR" ] && [ ! -w "$(dirname "$INSTALL_DIR")" ]; then
+      echo "${RED}Error: You don't have write permission to $INSTALL_DIR${NORMAL}"
+      echo "Please choose a different installation directory or ensure you have the proper permissions."
+      exit 1
+    fi
   fi
 }
 
@@ -123,8 +173,8 @@ install_binary() {
   
   # Check if the installation directory is in PATH
   if [ -n "${PATH##*$INSTALL_DIR*}" ]; then
-    echo "${RED}Warning: $INSTALL_DIR is not in your PATH.${NORMAL}"
-    echo "You may need to add it to your shell profile:"
+    echo "${YELLOW}Warning: $INSTALL_DIR is not in your PATH.${NORMAL}"
+    echo "To add it, run one of these commands based on your shell:"
     echo "  For bash: echo 'export PATH=\"\$PATH:$INSTALL_DIR\"' >> ~/.bash_profile"
     echo "  For zsh:  echo 'export PATH=\"\$PATH:$INSTALL_DIR\"' >> ~/.zshrc"
     echo "  For fish: echo 'fish_add_path $INSTALL_DIR' >> ~/.config/fish/config.fish"
