@@ -33,6 +33,7 @@ enum PushError: Error {
     case missingPart(Int)  // Added for sparse file handling
     case layerDownloadFailed(String)  // Added for download retries
     case manifestFetchFailed  // Added for manifest fetching
+    case insufficientPermissions(String)  // Added for permission issues
 }
 
 // Define a specific error type for when no underlying error exists
@@ -1694,13 +1695,15 @@ class ImageContainerRegistry: @unchecked Sendable {
         Logger.info("Cache copy complete")
     }
 
-    private func getToken(repository: String, scopes: [String] = ["pull", "push"]) async throws
+    private func getToken(repository: String, scopes: [String] = ["pull"]) async throws
         -> String
     {
         let encodedRepo = repository.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed)!
 
         // Build scope string from scopes array
         let scopeString = scopes.joined(separator: ",")
+
+        Logger.info("Requesting token with scopes: \(scopeString) for repository: \(repository)")
 
         let url = URL(
             string:
@@ -1719,7 +1722,27 @@ class ImageContainerRegistry: @unchecked Sendable {
                 if httpResponse.statusCode == 403 && scopes.contains("push")
                     && scopes.contains("pull")
                 {
+                    Logger.info("Permission denied for push scope, retrying with pull scope only")
                     return try await getToken(repository: repository, scopes: ["pull"])
+                }
+
+                // Check for authentication issues with better logging
+                if httpResponse.statusCode == 401 {
+                    // Try to parse the error message from the response
+                    let errorResponse =
+                        try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                    let errors = errorResponse?["errors"] as? [[String: Any]]
+                    let errorMessage =
+                        errors?.first?["message"] as? String ?? "Unknown authentication error"
+
+                    Logger.error("Authentication failed: \(errorMessage)")
+                    Logger.error(
+                        "Make sure GITHUB_USERNAME and GITHUB_TOKEN environment variables are set correctly"
+                    )
+                    Logger.error(
+                        "Your token must have 'packages:read' and 'packages:write' permissions")
+
+                    throw PushError.insufficientPermissions(errorMessage)
                 }
 
                 // For pull scope only, if authentication fails, assume this is a public image
@@ -2529,6 +2552,21 @@ class ImageContainerRegistry: @unchecked Sendable {
                 "reassemble": "\(reassemble)",
             ])
 
+        // Check for credentials if not in dry-run mode
+        if !dryRun {
+            let (username, token) = getCredentialsFromEnvironment()
+            if username == nil || token == nil {
+                Logger.error(
+                    "Missing GitHub credentials. Please set GITHUB_USERNAME and GITHUB_TOKEN environment variables"
+                )
+                Logger.error(
+                    "Your token must have 'packages:read' and 'packages:write' permissions")
+                throw PushError.authenticationFailed
+            }
+
+            Logger.info("Using GitHub credentials from environment variables")
+        }
+
         // Remove tag parsing here, imageName is now passed directly
         // let components = image.split(separator: ":") ...
         // let imageTag = String(tag)
@@ -2537,7 +2575,9 @@ class ImageContainerRegistry: @unchecked Sendable {
         var token: String = ""
         if !dryRun {
             Logger.info("Getting registry authentication token")
-            token = try await getToken(repository: "\(self.organization)/\(imageName)")
+            token = try await getToken(
+                repository: "\(self.organization)/\(imageName)",
+                scopes: ["pull", "push"])  // Explicitly specify both pull and push scopes
         } else {
             Logger.info("Dry run mode: skipping authentication token request")
         }
