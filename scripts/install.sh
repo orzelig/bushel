@@ -12,6 +12,8 @@ GREEN=$(tput setaf 2)
 BLUE=$(tput setaf 4)
 YELLOW=$(tput setaf 3)
 
+
+
 # Default installation directory (user-specific, doesn't require sudo)
 DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
@@ -173,11 +175,25 @@ install_binary() {
   
   # Check if the installation directory is in PATH
   if [ -n "${PATH##*$INSTALL_DIR*}" ]; then
+    SHELL_NAME=$(basename "$SHELL")
     echo "${YELLOW}Warning: $INSTALL_DIR is not in your PATH.${NORMAL}"
-    echo "To add it, run one of these commands based on your shell:"
-    echo "  For bash: echo 'export PATH=\"\$PATH:$INSTALL_DIR\"' >> ~/.bash_profile"
-    echo "  For zsh:  echo 'export PATH=\"\$PATH:$INSTALL_DIR\"' >> ~/.zshrc"
-    echo "  For fish: echo 'fish_add_path $INSTALL_DIR' >> ~/.config/fish/config.fish"
+    case "$SHELL_NAME" in
+      zsh)
+        echo "To add it, run:"
+        echo "  echo 'export PATH=\"\$PATH:$INSTALL_DIR\"' >> ~/.zprofile"
+        ;;
+      bash)
+        echo "To add it, run:"
+        echo "  echo 'export PATH=\"\$PATH:$INSTALL_DIR\"' >> ~/.bash_profile"
+        ;;
+      fish)
+        echo "To add it, run:"
+        echo "  echo 'fish_add_path $INSTALL_DIR' >> ~/.config/fish/config.fish"
+        ;;
+      *)
+        echo "Add $INSTALL_DIR to your PATH in your shell profile file."
+        ;;
+    esac
   fi
 }
 
