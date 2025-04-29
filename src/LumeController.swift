@@ -48,15 +48,72 @@ final class LumeController {
 
     /// Lists all virtual machines in the system
     @MainActor
-    public func list() throws -> [VMDetails] {
+    public func list(storage: String? = nil) throws -> [VMDetails] {
         do {
-            let vmLocations = try home.getAllVMDirectories()
-            let statuses = try vmLocations.map { vmWithLoc in
-                let vm = try self.get(
-                    name: vmWithLoc.directory.name, storage: vmWithLoc.locationName)
-                return vm.details
+            if let storage = storage {
+                // If storage is specified, only return VMs from that location
+                if storage.contains("/") || storage.contains("\\") {
+                    // Direct path - check if it exists
+                    if !FileManager.default.fileExists(atPath: storage) {
+                        // Return empty array if the path doesn't exist
+                        return []
+                    }
+                    
+                    // Try to get all VMs from the specified path
+                    // We need to check which subdirectories are valid VM dirs
+                    let directoryURL = URL(fileURLWithPath: storage)
+                    let contents = try FileManager.default.contentsOfDirectory(
+                        at: directoryURL,
+                        includingPropertiesForKeys: [.isDirectoryKey],
+                        options: .skipsHiddenFiles
+                    )
+                    
+                    let statuses = try contents.compactMap { subdir -> VMDetails? in
+                        guard let isDirectory = try subdir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory,
+                              isDirectory else {
+                            return nil
+                        }
+                        
+                        let vmName = subdir.lastPathComponent
+                        // Check if it's a valid VM directory
+                        let vmDir = try home.getVMDirectoryFromPath(vmName, storagePath: storage)
+                        if !vmDir.initialized() {
+                            return nil
+                        }
+                        
+                        do {
+                            let vm = try self.get(name: vmName, storage: storage)
+                            return vm.details
+                        } catch {
+                            // Skip invalid VM directories
+                            return nil
+                        }
+                    }
+                    return statuses
+                } else {
+                    // Named storage
+                    let vmsWithLoc = try home.getAllVMDirectories()
+                    let statuses = try vmsWithLoc.compactMap { vmWithLoc -> VMDetails? in
+                        // Only include VMs from the specified location
+                        if vmWithLoc.locationName != storage {
+                            return nil
+                        }
+                        let vm = try self.get(
+                            name: vmWithLoc.directory.name, storage: vmWithLoc.locationName)
+                        return vm.details
+                    }
+                    return statuses
+                }
+            } else {
+                // No storage filter - get all VMs
+                let vmsWithLoc = try home.getAllVMDirectories()
+                let statuses = try vmsWithLoc.compactMap { vmWithLoc -> VMDetails? in
+                    let vm = try self.get(
+                        name: vmWithLoc.directory.name, storage: vmWithLoc.locationName)
+                    return vm.details
+                }
+                return statuses
             }
-            return statuses
         } catch {
             Logger.error("Failed to list VMs", metadata: ["error": error.localizedDescription])
             throw error
@@ -133,20 +190,42 @@ final class LumeController {
     public func get(name: String, storage: String? = nil) throws -> VM {
         let normalizedName = normalizeVMName(name: name)
         do {
-            // Try to find the VM and get its actual location
-            let actualLocation = try self.validateVMExists(
-                normalizedName, storage: storage)
+            let vm: VM
+            if let storagePath = storage, storagePath.contains("/") || storagePath.contains("\\") {
+                // Storage is a direct path
+                let vmDir = try home.getVMDirectoryFromPath(normalizedName, storagePath: storagePath)
+                guard vmDir.initialized() else {
+                    // Throw a specific error if the directory exists but isn't a valid VM
+                    if vmDir.exists() {
+                        throw VMError.notInitialized(normalizedName)
+                    } else {
+                        throw VMError.notFound(normalizedName)
+                    }
+                }
+                // Pass the path as the storage context
+                vm = try self.loadVM(vmDir: vmDir, storage: storagePath)
+            } else {
+                // Storage is nil or a named location
+                let actualLocation = try self.validateVMExists(
+                    normalizedName, storage: storage)
 
-            // Load the VM from its actual location
-            let vm = try self.loadVM(name: normalizedName, storage: actualLocation)
+                let vmDir = try home.getVMDirectory(normalizedName, storage: actualLocation)
+                // loadVM will re-check initialized, but good practice to keep validateVMExists result.
+                vm = try self.loadVM(vmDir: vmDir, storage: actualLocation)
+            }
             return vm
         } catch {
-            Logger.error("Failed to get VM", metadata: ["error": error.localizedDescription])
+            Logger.error(
+                "Failed to get VM",
+                metadata: [
+                    "vmName": normalizedName, "storage": storage ?? "default",
+                    "error": error.localizedDescription,
+                ])
+            // Re-throw the original error to preserve its type
             throw error
         }
     }
 
-    /// Factory for creating the appropriate VM type based on the OS
     @MainActor
     public func create(
         name: String,
@@ -488,7 +567,7 @@ final class LumeController {
 
             let imageContainerRegistry = ImageContainerRegistry(
                 registry: registry, organization: organization)
-            try await imageContainerRegistry.pull(
+            let _ = try await imageContainerRegistry.pull(
                 image: actualImage,
                 name: vmName,
                 locationName: storage)
@@ -752,15 +831,17 @@ final class LumeController {
     }
 
     @MainActor
-    private func loadVM(name: String, storage: String? = nil) throws -> VM {
-        let vmDir = try home.getVMDirectory(name, storage: storage)
+    private func loadVM(vmDir: VMDirectory, storage: String?) throws -> VM {
+        // vmDir is now passed directly
         guard vmDir.initialized() else {
-            throw VMError.notInitialized(name)
+            throw VMError.notInitialized(vmDir.name) // Use name from vmDir
         }
 
         let config: VMConfig = try vmDir.loadConfig()
+        // Pass the provided storage (which could be a path or named location)
         let vmDirContext = VMDirContext(
-            dir: vmDir, config: config, home: home, storage: storage)
+            dir: vmDir, config: config, home: home, storage: storage
+        )
 
         let imageLoader =
             config.os.lowercased() == "macos" ? imageLoaderFactory.createImageLoader() : nil
@@ -808,11 +889,22 @@ final class LumeController {
     public func validateVMExists(_ name: String, storage: String? = nil) throws -> String? {
         // If location is specified, only check that location
         if let storage = storage {
-            let vmDir = try home.getVMDirectory(name, storage: storage)
-            guard vmDir.initialized() else {
-                throw VMError.notFound(name)
+            // Check if storage is a path by looking for directory separator
+            if storage.contains("/") || storage.contains("\\") {
+                // Treat as direct path
+                let vmDir = try home.getVMDirectoryFromPath(name, storagePath: storage)
+                guard vmDir.initialized() else {
+                    throw VMError.notFound(name)
+                }
+                return storage  // Return the path as the location identifier
+            } else {
+                // Treat as named storage
+                let vmDir = try home.getVMDirectory(name, storage: storage)
+                guard vmDir.initialized() else {
+                    throw VMError.notFound(name)
+                }
+                return storage
             }
-            return storage
         }
 
         // If no location specified, try to find the VM in any location
@@ -846,7 +938,29 @@ final class LumeController {
             throw ValidationError("Organization cannot be empty")
         }
 
-        let vmDir = try home.getVMDirectory(name, storage: storage)
+        // Determine if storage is a path or a named storage location
+        let vmDir: VMDirectory
+        if let storage = storage, storage.contains("/") || storage.contains("\\") {
+            // Create the base directory if it doesn't exist
+            if !FileManager.default.fileExists(atPath: storage) {
+                Logger.info("Creating VM storage directory", metadata: ["path": storage])
+                do {
+                    try FileManager.default.createDirectory(
+                        atPath: storage,
+                        withIntermediateDirectories: true
+                    )
+                } catch {
+                    throw HomeError.directoryCreationFailed(path: storage)
+                }
+            }
+            
+            // Use getVMDirectoryFromPath for direct paths
+            vmDir = try home.getVMDirectoryFromPath(name, storagePath: storage)
+        } else {
+            // Use getVMDirectory for named storage locations
+            vmDir = try home.getVMDirectory(name, storage: storage)
+        }
+        
         if vmDir.exists() {
             throw VMError.alreadyExists(name)
         }

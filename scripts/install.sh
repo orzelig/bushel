@@ -12,8 +12,6 @@ GREEN=$(tput setaf 2)
 BLUE=$(tput setaf 4)
 YELLOW=$(tput setaf 3)
 
-
-
 # Default installation directory (user-specific, doesn't require sudo)
 DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
@@ -204,11 +202,84 @@ main() {
   create_temp_dir
   download_release
   install_binary
-  
+
   echo ""
   echo "${GREEN}${BOLD}Lume has been successfully installed!${NORMAL}"
   echo "Run ${BOLD}lume${NORMAL} to get started."
+
+  # --- LaunchAgent setup for lume daemon ---
+  SERVICE_NAME="com.trycua.lume_daemon"
+  PLIST_PATH="$HOME/Library/LaunchAgents/$SERVICE_NAME.plist"
+  LUME_BIN="$INSTALL_DIR/lume"
+
+  echo ""
+  echo "Setting up LaunchAgent to run lume daemon on login..."
+
+  # Create LaunchAgents directory if it doesn't exist
+  mkdir -p "$HOME/Library/LaunchAgents"
+
+  # Unload existing service if present
+  if [ -f "$PLIST_PATH" ]; then
+    echo "Existing LaunchAgent found. Unloading..."
+    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+  fi
+
+  # Create the plist file
+  cat <<EOF > "$PLIST_PATH"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$SERVICE_NAME</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$LUME_BIN</string>
+        <string>serve</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>WorkingDirectory</key>
+    <string>$HOME</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin</string>
+        <key>HOME</key>
+        <string>$HOME</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/lume_daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/lume_daemon.error.log</string>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>SessionType</key>
+    <string>Aqua</string>
+</dict>
+</plist>
+EOF
+
+  # Set permissions
+  chmod 644 "$PLIST_PATH"
+  touch /tmp/lume_daemon.log /tmp/lume_daemon.error.log
+  chmod 644 /tmp/lume_daemon.log /tmp/lume_daemon.error.log
+
+  # Load the LaunchAgent
+  echo "Loading LaunchAgent..."
+  launchctl unload "$PLIST_PATH" 2>/dev/null || true
+  launchctl load "$PLIST_PATH"
+
+  echo "${GREEN}Lume daemon LaunchAgent installed and loaded. It will start automatically on login!${NORMAL}"
+  echo "To check status: launchctl list | grep $SERVICE_NAME"
+  echo "To view logs: tail -f /tmp/lume_daemon.log"
+  echo ""
+  echo "To remove the lume daemon service, run:"
+  echo "  launchctl unload \"$PLIST_PATH\""
+  echo "  rm \"$PLIST_PATH\""
 }
 
 # Run the installation
-main 
+main
