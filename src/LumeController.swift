@@ -408,58 +408,84 @@ final class LumeController {
             "Running VM",
             metadata: [
                 "name": normalizedName,
-                "location": storage ?? "default",
                 "no_display": "\(noDisplay)",
                 "shared_directories":
                     "\(sharedDirectories.map( { $0.string } ).joined(separator: ", "))",
                 "mount": mount?.path ?? "none",
                 "vnc_port": "\(vncPort)",
                 "recovery_mode": "\(recoveryMode)",
-                "storage_param": storage ?? "default",
+                "storage_param": storage ?? "default", // Log the original param
                 "usb_storage_devices": "\(usbMassStoragePaths?.count ?? 0)",
             ])
 
         do {
-            // Check if this is an image reference (contains a tag)
-            let components = name.split(separator: ":")
-            if components.count == 2 {
-                do {
-                    _ = try self.validateVMExists(normalizedName, storage: storage)
-                } catch {
-                    // If the VM doesn't exist, try to pull the image
+            // Check if name is an image ref to auto-pull
+            let components = normalizedName.split(separator: ":")
+            if components.count == 2 { // Check if it looks like image:tag
+                // Attempt to validate if VM exists first, suppressing the error
+                // This avoids pulling if the VM already exists, even if name looks like an image ref
+                let vmExists = (try? self.validateVMExists(normalizedName, storage: storage)) != nil
+                if !vmExists {
+                    Logger.info(
+                        "VM not found, attempting to pull image based on name",
+                        metadata: ["imageRef": normalizedName])
+                    // Use the potentially new VM name derived from the image ref
+                    let potentialVMName = String(components[0])
                     try await pullImage(
-                        image: name,
-                        name: nil,
+                        image: normalizedName, // Full image ref
+                        name: potentialVMName, // Name derived from image
                         registry: registry,
                         organization: organization,
                         storage: storage
                     )
+                    // Important: After pull, the effective name might have changed
+                    // We proceed assuming the user wants to run the VM derived from image name
+                    // normalizedName = potentialVMName // Re-assign normalizedName if pull logic creates it
+                    // Note: Current pullImage doesn't return the final VM name, 
+                    // so we assume it matches the name derived from the image.
+                    // This might need refinement if pullImage behaviour changes.
                 }
             }
 
-            // Find VM and get its actual location
-            let actualLocation = try validateVMExists(normalizedName, storage: storage)
+            // Determine effective storage path or name AND get the VMDirectory
+            let effectiveStorage: String?
+            let vmDir: VMDirectory
 
-            // Log if we found the VM in a different location than default
-            if actualLocation != storage && actualLocation != nil {
+            if let storagePath = storage, storagePath.contains("/") || storagePath.contains("\\") {
+                // Storage is a direct path
+                vmDir = try home.getVMDirectoryFromPath(normalizedName, storagePath: storagePath)
+                guard vmDir.initialized() else {
+                    if vmDir.exists() {
+                        throw VMError.notInitialized(normalizedName)
+                    } else {
+                        throw VMError.notFound(normalizedName)
+                    }
+                }
+                effectiveStorage = storagePath // Use the path string
+                Logger.info("Using direct storage path", metadata: ["path": storagePath])
+            } else {
+                // Storage is nil or a named location - validate and get the actual name
+                let actualLocationName = try validateVMExists(normalizedName, storage: storage)
+                vmDir = try home.getVMDirectory(normalizedName, storage: actualLocationName) // Get VMDir for named location
+                effectiveStorage = actualLocationName // Use the named location string
                 Logger.info(
-                    "Found VM in location",
+                    "Using named storage location",
                     metadata: [
-                        "name": normalizedName,
-                        "location": actualLocation ?? "default",
+                        "requested": storage ?? "default",
+                        "actual": actualLocationName ?? "default",
                     ])
             }
 
+            // Validate parameters using the located VMDirectory
             try validateRunParameters(
-                name: normalizedName,
+                vmDir: vmDir, // Pass vmDir
                 sharedDirectories: sharedDirectories,
                 mount: mount,
-                storage: actualLocation,
                 usbMassStoragePaths: usbMassStoragePaths
             )
 
-            // Use the actual VM location that we found
-            let vm = try get(name: normalizedName, storage: actualLocation)
+            // Load the VM directly using the located VMDirectory and storage context
+            let vm = try self.loadVM(vmDir: vmDir, storage: effectiveStorage)
 
             SharedVM.shared.setVM(name: normalizedName, vm: vm)
             try await vm.run(
@@ -918,6 +944,51 @@ final class LumeController {
         throw VMError.notFound(name)
     }
 
+    private func validateRunParameters(
+        vmDir: VMDirectory, // Changed signature: accept VMDirectory
+        sharedDirectories: [SharedDirectory]?,
+        mount: Path?,
+        usbMassStoragePaths: [Path]? = nil
+    ) throws {
+        // VM existence is confirmed by having vmDir, no need for validateVMExists
+        if let dirs = sharedDirectories {
+            try self.validateSharedDirectories(dirs)
+        }
+
+        // Validate USB mass storage paths
+        if let usbPaths = usbMassStoragePaths {
+            for path in usbPaths {
+                if !FileManager.default.fileExists(atPath: path.path) {
+                    throw ValidationError("USB mass storage image not found: \(path.path)")
+                }
+            }
+
+            if #available(macOS 15.0, *) {
+                // USB mass storage is supported
+            } else {
+                Logger.info(
+                    "USB mass storage devices require macOS 15.0 or later. They will be ignored.")
+            }
+        }
+
+        // Load config directly from vmDir
+        let vmConfig = try vmDir.loadConfig()
+        switch vmConfig.os.lowercased() {
+        case "macos":
+            if mount != nil {
+                throw ValidationError(
+                    "Mounting disk images is not supported for macOS VMs. If you are looking to mount a IPSW, please use the --ipsw option in the create command."
+                )
+            }
+        case "linux":
+            if let mount = mount, !FileManager.default.fileExists(atPath: mount.path) {
+                throw ValidationError("Mount file not found: \(mount.path)")
+            }
+        default:
+            break
+        }
+    }
+
     private func validatePullParameters(
         image: String,
         name: String,
@@ -963,48 +1034,6 @@ final class LumeController {
         
         if vmDir.exists() {
             throw VMError.alreadyExists(name)
-        }
-    }
-
-    private func validateRunParameters(
-        name: String, sharedDirectories: [SharedDirectory]?, mount: Path?,
-        storage: String? = nil, usbMassStoragePaths: [Path]? = nil
-    ) throws {
-        _ = try self.validateVMExists(name, storage: storage)
-        if let dirs = sharedDirectories {
-            try self.validateSharedDirectories(dirs)
-        }
-
-        // Validate USB mass storage paths
-        if let usbPaths = usbMassStoragePaths {
-            for path in usbPaths {
-                if !FileManager.default.fileExists(atPath: path.path) {
-                    throw ValidationError("USB mass storage image not found: \(path.path)")
-                }
-            }
-
-            if #available(macOS 15.0, *) {
-                // USB mass storage is supported
-            } else {
-                Logger.info(
-                    "USB mass storage devices require macOS 15.0 or later. They will be ignored.")
-            }
-        }
-
-        let vmConfig = try home.getVMDirectory(name, storage: storage).loadConfig()
-        switch vmConfig.os.lowercased() {
-        case "macos":
-            if mount != nil {
-                throw ValidationError(
-                    "Mounting disk images is not supported for macOS VMs. If you are looking to mount a IPSW, please use the --ipsw option in the create command."
-                )
-            }
-        case "linux":
-            if let mount = mount, !FileManager.default.fileExists(atPath: mount.path) {
-                throw ValidationError("Mount file not found: \(mount.path)")
-            }
-        default:
-            break
         }
     }
 
