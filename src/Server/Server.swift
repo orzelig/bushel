@@ -179,8 +179,21 @@ final class Server {
                         return HTTPResponse(statusCode: .badRequest, body: "Missing VM name")
                     }
 
-                    // Extract storage from query params if present
-                    let storage = self.extractQueryParam(request: request, name: "storage")
+                    Logger.info("Processing stop VM request", metadata: ["method": request.method, "path": request.path])
+
+                    // Extract storage from the request body
+                    var storage: String? = nil
+                    if let bodyData = request.body, !bodyData.isEmpty {
+                        do {
+                            if let json = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
+                               let bodyStorage = json["storage"] as? String {
+                                storage = bodyStorage
+                                Logger.info("Extracted storage from request body", metadata: ["storage": bodyStorage])
+                            }
+                        } catch {
+                            Logger.error("Failed to parse request body JSON", metadata: ["error": error.localizedDescription])
+                        }
+                    }
 
                     return try await self.handleStopVM(name: name, storage: storage)
                 }),
