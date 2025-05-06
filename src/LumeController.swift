@@ -289,20 +289,35 @@ final class LumeController {
             ])
 
         do {
-            // Find the actual location of the VM
-            let actualLocation = try self.validateVMExists(
-                normalizedName, storage: storage)
-
+            let vmDir: VMDirectory
+            
+            // Check if storage is a direct path
+            if let storagePath = storage, storagePath.contains("/") || storagePath.contains("\\") {
+                // Storage is a direct path
+                vmDir = try home.getVMDirectoryFromPath(normalizedName, storagePath: storagePath)
+                guard vmDir.initialized() else {
+                    // Throw a specific error if the directory exists but isn't a valid VM
+                    if vmDir.exists() {
+                        throw VMError.notInitialized(normalizedName)
+                    } else {
+                        throw VMError.notFound(normalizedName)
+                    }
+                }
+            } else {
+                // Storage is nil or a named location
+                let actualLocation = try self.validateVMExists(normalizedName, storage: storage)
+                vmDir = try home.getVMDirectory(normalizedName, storage: actualLocation)
+            }
+            
             // Stop VM if it's running
             if SharedVM.shared.getVM(name: normalizedName) != nil {
                 try await stopVM(name: normalizedName)
             }
-
-            let vmDir = try home.getVMDirectory(normalizedName, storage: actualLocation)
+            
             try vmDir.delete()
-
+            
             Logger.info("VM deleted successfully", metadata: ["name": normalizedName])
-
+            
         } catch {
             Logger.error("Failed to delete VM", metadata: ["error": error.localizedDescription])
             throw error
