@@ -27,7 +27,7 @@ func resolveBinaryPath(_ name: String) -> URL? {
 // Helper function to parse size strings
 func parseSize(_ input: String) throws -> UInt64 {
     let lowercased = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    let multiplier: UInt64
+    let multiplier: Double 
     let valueString: String
 
     if lowercased.hasSuffix("tb") {
@@ -43,15 +43,21 @@ func parseSize(_ input: String) throws -> UInt64 {
         multiplier = 1024
         valueString = String(lowercased.dropLast(2))
     } else {
-        multiplier = 1024 * 1024 // Default to MB
+        multiplier = 1024 * 1024
         valueString = lowercased
     }
 
-    guard let value = UInt64(valueString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-        throw ValidationError("Malformed size input: \(input)") // Throw ad-hoc error for invalid input
+    guard let value = Double(valueString.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+        throw ValidationError("Malformed size input: \(input). Could not parse numeric value.")
     }
 
-    let val = value * multiplier
+    let bytesAsDouble = (value * multiplier).rounded()
+    
+    guard bytesAsDouble >= 0 && bytesAsDouble <= Double(UInt64.max) else {
+        throw ValidationError("Calculated size out of bounds for UInt64: \(input)")
+    }
+
+    let val = UInt64(bytesAsDouble)
 
     return val
 }
