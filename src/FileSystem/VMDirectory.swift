@@ -53,18 +53,18 @@ extension VMDirectory {
         let diskExists = diskPath.exists()
         let nvramExists = nvramPath.exists()
         
-        Logger.info(
-            "VM directory initialization check", 
-            metadata: [
-                "directory": dir.path,
-                "config_path": configPath.path,
-                "config_exists": "\(configExists)",
-                "disk_path": diskPath.path,
-                "disk_exists": "\(diskExists)",
-                "nvram_path": nvramPath.path,
-                "nvram_exists": "\(nvramExists)"
-            ]
-        )
+        // Logger.info(
+        //     "VM directory initialization check", 
+        //     metadata: [
+        //         "directory": dir.path,
+        //         "config_path": configPath.path,
+        //         "config_exists": "\(configExists)",
+        //         "disk_path": diskPath.path,
+        //         "disk_exists": "\(diskExists)",
+        //         "nvram_path": nvramPath.path,
+        //         "nvram_exists": "\(nvramExists)"
+        //     ]
+        // )
         
         return configExists && diskExists && nvramExists
     }
@@ -139,11 +139,19 @@ extension VMDirectory {
 
 struct VNCSession: Codable {
     let url: String
+    let sharedDirectories: [SharedDirectory]?
+    
+    init(url: String, sharedDirectories: [SharedDirectory]? = nil) {
+        self.url = url
+        self.sharedDirectories = sharedDirectories
+    }
 }
 
 extension VMDirectory {
     /// Saves VNC session information to disk
-    /// - Parameter session: The VNC session to save
+    /// - Parameters:
+    ///   - session: The VNC session to save
+    ///   - sharedDirectories: Optional array of shared directories to save with the session
     /// - Throws: VMDirectoryError if the save operation fails
     func saveSession(_ session: VNCSession) throws {
         let encoder = JSONEncoder()

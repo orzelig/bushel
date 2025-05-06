@@ -8,8 +8,14 @@ codesign --force --entitlement ./resources/lume.entitlements --sign - .build/rel
 mkdir -p ./.release
 cp -f .build/release/lume ./.release/lume
 
-# Create symbolic link in /usr/local/bin
-sudo mkdir -p /usr/local/bin
-sudo ln -sf "$(pwd)/.release/lume" /usr/local/bin/lume
+# Install to user-local bin directory (standard location)
+USER_BIN="$HOME/.local/bin"
+mkdir -p "$USER_BIN"
+cp -f ./.release/lume "$USER_BIN/lume"
+
+# Advise user to add to PATH if not present
+if ! echo "$PATH" | grep -q "$USER_BIN"; then
+  echo "[lume build] Note: $USER_BIN is not in your PATH. Add 'export PATH=\"$USER_BIN:\$PATH\"' to your shell profile."
+fi
 
 popd

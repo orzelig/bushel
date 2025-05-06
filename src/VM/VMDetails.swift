@@ -40,6 +40,7 @@ struct VMDetails: Codable {
     let vncUrl: String?
     let ipAddress: String?
     let locationName: String
+    let sharedDirectories: [SharedDirectory]?
 
     init(
         name: String,
@@ -51,7 +52,8 @@ struct VMDetails: Codable {
         status: String,
         vncUrl: String?,
         ipAddress: String?,
-        locationName: String
+        locationName: String,
+        sharedDirectories: [SharedDirectory]? = nil
     ) {
         self.name = name
         self.os = os
@@ -63,5 +65,6 @@ struct VMDetails: Codable {
         self.vncUrl = vncUrl
         self.ipAddress = ipAddress
         self.locationName = locationName
+        self.sharedDirectories = sharedDirectories
     }
 }

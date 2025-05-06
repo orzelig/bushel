@@ -78,6 +78,23 @@ class VM {
     var details: VMDetails {
         let isRunning: Bool = self.isRunning
         let vncUrl = isRunning ? getVNCUrl() : nil
+        
+        // Try to load shared directories from the session file
+        var sharedDirs: [SharedDirectory]? = nil
+        
+        // Check if sessions file exists and load shared directories
+        let sessionsPath = vmDirContext.dir.sessionsPath.path
+        let fileExists = FileManager.default.fileExists(atPath: sessionsPath)
+        
+        do {
+            if fileExists {
+                let session = try vmDirContext.dir.loadSession()
+                sharedDirs = session.sharedDirectories
+            }
+        } catch {
+            // It's okay if we don't have a saved session
+            Logger.error("Failed to load session data", metadata: ["name": vmDirContext.name, "error": "\(error)"])
+        }
 
         return VMDetails(
             name: vmDirContext.name,
@@ -90,7 +107,8 @@ class VM {
             vncUrl: vncUrl,
             ipAddress: isRunning
                 ? DHCPLeaseParser.getIPAddress(forMAC: vmDirContext.config.macAddress!) : nil,
-            locationName: vmDirContext.storage ?? "default"
+            locationName: vmDirContext.storage ?? "default",
+            sharedDirectories: sharedDirs
         )
     }
 
@@ -117,15 +135,17 @@ class VM {
             throw VMError.alreadyRunning(vmDirContext.name)
         }
 
+        // Keep track of shared directories for logging
+
         Logger.info(
             "Running VM with configuration",
             metadata: [
                 "cpuCount": "\(cpuCount)",
                 "memorySize": "\(memorySize)",
                 "diskSize": "\(vmDirContext.config.diskSize ?? 0)",
-                "sharedDirectories": sharedDirectories.map(
-                    { $0.string }
-                ).joined(separator: ", "),
+                "macAddress": vmDirContext.config.macAddress ?? "none",
+                "sharedDirectoryCount": "\(sharedDirectories.count)",
+                "mount": mount?.path ?? "none",
                 "vncPort": "\(vncPort)",
                 "recoveryMode": "\(recoveryMode)",
                 "usbMassStorageDeviceCount": "\(usbMassStoragePaths?.count ?? 0)",
@@ -160,7 +180,7 @@ class VM {
             )
             virtualizationService = try virtualizationServiceFactory(config)
 
-            let vncInfo = try await setupVNC(noDisplay: noDisplay, port: vncPort)
+            let vncInfo = try await setupSession(noDisplay: noDisplay, port: vncPort, sharedDirectories: sharedDirectories)
             Logger.info("VNC info", metadata: ["vncInfo": vncInfo])
 
             // Start the VM
@@ -391,7 +411,8 @@ class VM {
         return vncService.url
     }
 
-    private func setupVNC(noDisplay: Bool, port: Int = 0) async throws -> String {
+    /// Sets up the VNC service and returns the VNC URL
+    private func startVNCService(port: Int = 0) async throws -> String {
         guard let service = virtualizationService else {
             throw VMError.internalError("Virtualization service not initialized")
         }
@@ -401,12 +422,40 @@ class VM {
         guard let url = vncService.url else {
             throw VMError.vncNotConfigured
         }
-
+        
+        return url
+    }
+    
+    /// Saves the session information including shared directories to disk
+    private func saveSessionData(url: String, sharedDirectories: [SharedDirectory]) {
+        do {
+            let session = VNCSession(url: url, sharedDirectories: sharedDirectories.isEmpty ? nil : sharedDirectories)
+            try vmDirContext.dir.saveSession(session)
+            Logger.info("Saved VNC session with shared directories", 
+                       metadata: [
+                         "count": "\(sharedDirectories.count)", 
+                         "dirs": "\(sharedDirectories.map { $0.hostPath }.joined(separator: ", "))",
+                         "sessionsPath": "\(vmDirContext.dir.sessionsPath.path)"
+                       ])
+        } catch {
+            Logger.error("Failed to save VNC session", metadata: ["error": "\(error)"])
+        }
+    }
+    
+    /// Main session setup method that handles VNC and persists session data
+    private func setupSession(noDisplay: Bool, port: Int = 0, sharedDirectories: [SharedDirectory] = []) async throws -> String {
+        // Start the VNC service and get the URL
+        let url = try await startVNCService(port: port)
+        
+        // Save the session data
+        saveSessionData(url: url, sharedDirectories: sharedDirectories)
+        
+        // Open the VNC client if needed
         if !noDisplay {
             Logger.info("Starting VNC session")
             try await vncService.openClient(url: url)
         }
-
+        
         return url
     }
 
@@ -550,7 +599,7 @@ class VM {
             )
             virtualizationService = try virtualizationServiceFactory(config)
 
-            let vncInfo = try await setupVNC(noDisplay: noDisplay, port: vncPort)
+            let vncInfo = try await setupSession(noDisplay: noDisplay, port: vncPort, sharedDirectories: sharedDirectories)
             Logger.info("VNC info", metadata: ["vncInfo": vncInfo])
 
             // Start the VM

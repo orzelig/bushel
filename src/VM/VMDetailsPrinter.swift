@@ -32,6 +32,16 @@ enum VMDetailsPrinter {
             }),
         Column(header: "storage", width: 16, getValue: { $0.locationName }),
         Column(
+            header: "shared_dirs", width: 54,
+            getValue: { vm in
+                // Only show shared directories if the VM is running
+                if vm.status == "running", let dirs = vm.sharedDirectories, !dirs.isEmpty {
+                    return dirs.map { "\($0.hostPath) (\($0.readOnly ? "ro" : "rw"))" }.joined(separator: ", ")
+                } else {
+                    return "-"
+                }
+            }),
+        Column(
             header: "ip", width: 16,
             getValue: {
                 $0.ipAddress ?? "-"
@@ -56,7 +66,9 @@ enum VMDetailsPrinter {
             print(jsonString)
         } else {
             printHeader(print: print)
-            vms.forEach({ printVM($0, print: print) })
+            vms.forEach({ vm in 
+                printVM(vm, print: print)
+            })
         }
     }
 

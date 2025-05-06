@@ -142,10 +142,14 @@ log "normal" "Using release directory: $RELEASE_DIR"
 # Copy extracted lume to the release directory
 cp -f usr/local/bin/lume "$RELEASE_DIR/lume"
 
-# Create symbolic link in /usr/local/bin if not in minimal mode
-if [ "$LOG_LEVEL" != "minimal" ] && [ "$LOG_LEVEL" != "none" ]; then
-  log "normal" "Creating symbolic link..."
-  sudo ln -sf "$RELEASE_DIR/lume" /usr/local/bin/lume
+# Install to user-local bin directory (standard location)
+USER_BIN="$HOME/.local/bin"
+mkdir -p "$USER_BIN"
+cp -f "$RELEASE_DIR/lume" "$USER_BIN/lume"
+
+# Advise user to add to PATH if not present
+if ! echo "$PATH" | grep -q "$USER_BIN"; then
+  log "normal" "[lume build] Note: $USER_BIN is not in your PATH. Add 'export PATH=\"$USER_BIN:\$PATH\"' to your shell profile."
 fi
 
 # Get architecture and create OS identifier
