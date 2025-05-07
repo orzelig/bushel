@@ -23,13 +23,21 @@ LATEST_RELEASE_URL="https://api.github.com/repos/$GITHUB_REPO/releases/latest"
 # Option to skip background service setup (default: install it)
 INSTALL_BACKGROUND_SERVICE=true
 
+# Default port for lume serve (default: 3000)
+LUME_PORT=3000
+
 # Parse command line arguments
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --install-dir=*)
-      INSTALL_DIR="${1#*=}"
+    --install-dir)
+      INSTALL_DIR="$2"
+      shift
       ;;
-    --no-background-service|--skip-background-service)
+    --port)
+      LUME_PORT="$2"
+      shift
+      ;;
+    --no-background-service)
       INSTALL_BACKGROUND_SERVICE=false
       ;;
     --help)
@@ -37,13 +45,15 @@ while [ "$#" -gt 0 ]; do
       echo "Usage: $0 [OPTIONS]"
       echo ""
       echo "Options:"
-      echo "  --install-dir=DIR         Install to the specified directory (default: $DEFAULT_INSTALL_DIR)"
+      echo "  --install-dir DIR         Install to the specified directory (default: $DEFAULT_INSTALL_DIR)"
+      echo "  --port PORT              Specify the port for lume serve (default: 3000)"
       echo "  --no-background-service   Do not setup the Lume background service (LaunchAgent)"
       echo "  --help                    Display this help message"
       echo ""
       echo "Examples:"
       echo "  $0                                   # Install to $DEFAULT_INSTALL_DIR and setup background service"
       echo "  $0 --install-dir=/usr/local/bin      # Install to system directory (may require root privileges)"
+      echo "  $0 --port 3001                       # Use port 3001 instead of the default 3000"
       echo "  $0 --no-background-service           # Install without setting up the background service"
       echo "  INSTALL_DIR=/opt/lume $0             # Install to /opt/lume (legacy env var support)"
       exit 0
@@ -245,6 +255,8 @@ main() {
     <array>
         <string>$LUME_BIN</string>
         <string>serve</string>
+        <string>--port</string>
+        <string>$LUME_PORT</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
