@@ -12,6 +12,16 @@ GREEN=$(tput setaf 2)
 BLUE=$(tput setaf 4)
 YELLOW=$(tput setaf 3)
 
+# Check if running as root or with sudo
+if [ "$(id -u)" -eq 0 ] || [ -n "$SUDO_USER" ]; then
+  echo "${RED}Error: Do not run this script with sudo or as root.${NORMAL}"
+  echo "If you need to install to a system directory, create it first with proper permissions:"
+  echo "  sudo mkdir -p /desired/directory && sudo chown $(whoami) /desired/directory"
+  echo "Then run the installer normally:"
+  echo "  ./install.sh --install-dir=/desired/directory"
+  exit 1
+fi
+
 # Default installation directory (user-specific, doesn't require sudo)
 DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
