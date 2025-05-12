@@ -65,9 +65,16 @@ class VM {
     // MARK: - VM State Management
 
     private var isRunning: Bool {
-        // First check if we have an IP address
-        guard let ipAddress = DHCPLeaseParser.getIPAddress(forMAC: vmDirContext.config.macAddress!)
-        else {
+        // First check if we have a MAC address
+        guard let macAddress = vmDirContext.config.macAddress else {
+            Logger.info(
+                "Cannot check if VM is running: macAddress is nil",
+                metadata: ["name": vmDirContext.name])
+            return false
+        }
+
+        // Then check if we have an IP address
+        guard let ipAddress = DHCPLeaseParser.getIPAddress(forMAC: macAddress) else {
             return false
         }
 
@@ -78,37 +85,35 @@ class VM {
     var details: VMDetails {
         let isRunning: Bool = self.isRunning
         let vncUrl = isRunning ? getVNCUrl() : nil
-        
-        // Try to load shared directories from the session file
-        var sharedDirs: [SharedDirectory]? = nil
-        
-        // Check if sessions file exists and load shared directories
-        let sessionsPath = vmDirContext.dir.sessionsPath.path
-        let fileExists = FileManager.default.fileExists(atPath: sessionsPath)
-        
+
+        // Safely get disk size with fallback
+        let diskSizeValue: DiskSize
         do {
-            if fileExists {
-                let session = try vmDirContext.dir.loadSession()
-                sharedDirs = session.sharedDirectories
-            }
+            diskSizeValue = try getDiskSize()
         } catch {
-            // It's okay if we don't have a saved session
-            Logger.error("Failed to load session data", metadata: ["name": vmDirContext.name, "error": "\(error)"])
+            Logger.error(
+                "Failed to get disk size",
+                metadata: ["name": vmDirContext.name, "error": "\(error)"])
+            // Provide a fallback value to avoid crashing
+            diskSizeValue = DiskSize(allocated: 0, total: vmDirContext.config.diskSize ?? 0)
         }
+
+        // Safely access MAC address
+        let macAddress = vmDirContext.config.macAddress
+        let ipAddress: String? =
+            isRunning && macAddress != nil ? DHCPLeaseParser.getIPAddress(forMAC: macAddress!) : nil
 
         return VMDetails(
             name: vmDirContext.name,
             os: getOSType(),
             cpuCount: vmDirContext.config.cpuCount ?? 0,
             memorySize: vmDirContext.config.memorySize ?? 0,
-            diskSize: try! getDiskSize(),
+            diskSize: diskSizeValue,
             display: vmDirContext.config.display.string,
             status: isRunning ? "running" : "stopped",
             vncUrl: vncUrl,
-            ipAddress: isRunning
-                ? DHCPLeaseParser.getIPAddress(forMAC: vmDirContext.config.macAddress!) : nil,
-            locationName: vmDirContext.storage ?? "default",
-            sharedDirectories: sharedDirs
+            ipAddress: ipAddress,
+            locationName: vmDirContext.storage ?? "default"
         )
     }
 
@@ -118,57 +123,84 @@ class VM {
         noDisplay: Bool, sharedDirectories: [SharedDirectory], mount: Path?, vncPort: Int = 0,
         recoveryMode: Bool = false, usbMassStoragePaths: [Path]? = nil
     ) async throws {
+        Logger.info(
+            "VM.run method called",
+            metadata: [
+                "name": vmDirContext.name,
+                "noDisplay": "\(noDisplay)",
+                "recoveryMode": "\(recoveryMode)",
+            ])
+
         guard vmDirContext.initialized else {
+            Logger.error("VM not initialized", metadata: ["name": vmDirContext.name])
             throw VMError.notInitialized(vmDirContext.name)
         }
 
         guard let cpuCount = vmDirContext.config.cpuCount,
             let memorySize = vmDirContext.config.memorySize
         else {
+            Logger.error("VM missing cpuCount or memorySize", metadata: ["name": vmDirContext.name])
             throw VMError.notInitialized(vmDirContext.name)
         }
 
         // Try to acquire lock on config file
-        let fileHandle = try FileHandle(forWritingTo: vmDirContext.dir.configPath.url)
-        guard flock(fileHandle.fileDescriptor, LOCK_EX | LOCK_NB) == 0 else {
-            try? fileHandle.close()
-            throw VMError.alreadyRunning(vmDirContext.name)
-        }
+        Logger.info(
+            "Attempting to acquire lock on config file",
+            metadata: [
+                "path": vmDirContext.dir.configPath.path,
+                "name": vmDirContext.name,
+            ])
+        var fileHandle = try FileHandle(forWritingTo: vmDirContext.dir.configPath.url)
 
-        // Keep track of shared directories for logging
+        if flock(fileHandle.fileDescriptor, LOCK_EX | LOCK_NB) != 0 {
+            try? fileHandle.close()
+            Logger.error(
+                "VM already running (failed to acquire lock)", metadata: ["name": vmDirContext.name]
+            )
+
+            // Try to forcibly clear the lock before giving up
+            Logger.info("Attempting emergency lock cleanup", metadata: ["name": vmDirContext.name])
+            unlockConfigFile()
+
+            // Try one more time to acquire the lock
+            if let retryHandle = try? FileHandle(forWritingTo: vmDirContext.dir.configPath.url),
+                flock(retryHandle.fileDescriptor, LOCK_EX | LOCK_NB) == 0
+            {
+                Logger.info("Emergency lock cleanup worked", metadata: ["name": vmDirContext.name])
+                // Continue with a fresh file handle
+                try? retryHandle.close()
+                // Get a completely new file handle to be safe
+                guard let newHandle = try? FileHandle(forWritingTo: vmDirContext.dir.configPath.url)
+                else {
+                    throw VMError.internalError("Failed to open file handle after lock cleanup")
+                }
+                // Update our main file handle
+                fileHandle = newHandle
+            } else {
+                // If we still can't get the lock, give up
+                Logger.error(
+                    "Could not acquire lock even after emergency cleanup",
+                    metadata: ["name": vmDirContext.name])
+                throw VMError.alreadyRunning(vmDirContext.name)
+            }
+        }
+        Logger.info("Successfully acquired lock", metadata: ["name": vmDirContext.name])
 
         Logger.info(
             "Running VM with configuration",
             metadata: [
+                "name": vmDirContext.name,
                 "cpuCount": "\(cpuCount)",
                 "memorySize": "\(memorySize)",
                 "diskSize": "\(vmDirContext.config.diskSize ?? 0)",
-                "macAddress": vmDirContext.config.macAddress ?? "none",
-                "sharedDirectoryCount": "\(sharedDirectories.count)",
-                "mount": mount?.path ?? "none",
-                "vncPort": "\(vncPort)",
+                "sharedDirectories": sharedDirectories.map { $0.string }.joined(separator: ", "),
                 "recoveryMode": "\(recoveryMode)",
-                "usbMassStorageDeviceCount": "\(usbMassStoragePaths?.count ?? 0)",
-            ])
-
-        // Log disk paths and existence for debugging
-        Logger.info(
-            "VM disk paths",
-            metadata: [
-                "diskPath": vmDirContext.diskPath.path,
-                "diskExists":
-                    "\(FileManager.default.fileExists(atPath: vmDirContext.diskPath.path))",
-                "nvramPath": vmDirContext.nvramPath.path,
-                "nvramExists":
-                    "\(FileManager.default.fileExists(atPath: vmDirContext.nvramPath.path))",
-                "configPath": vmDirContext.dir.configPath.path,
-                "configExists":
-                    "\(FileManager.default.fileExists(atPath: vmDirContext.dir.configPath.path))",
-                "locationName": vmDirContext.storage ?? "default",
             ])
 
         // Create and configure the VM
         do {
+            Logger.info(
+                "Creating virtualization service context", metadata: ["name": vmDirContext.name])
             let config = try createVMVirtualizationServiceContext(
                 cpuCount: cpuCount,
                 memorySize: memorySize,
@@ -178,32 +210,64 @@ class VM {
                 recoveryMode: recoveryMode,
                 usbMassStoragePaths: usbMassStoragePaths
             )
-            virtualizationService = try virtualizationServiceFactory(config)
+            Logger.info(
+                "Successfully created virtualization service context",
+                metadata: ["name": vmDirContext.name])
 
-            let vncInfo = try await setupSession(noDisplay: noDisplay, port: vncPort, sharedDirectories: sharedDirectories)
-            Logger.info("VNC info", metadata: ["vncInfo": vncInfo])
+            Logger.info(
+                "Initializing virtualization service", metadata: ["name": vmDirContext.name])
+            virtualizationService = try virtualizationServiceFactory(config)
+            Logger.info(
+                "Successfully initialized virtualization service",
+                metadata: ["name": vmDirContext.name])
+
+            Logger.info(
+                "Setting up VNC",
+                metadata: [
+                    "name": vmDirContext.name,
+                    "noDisplay": "\(noDisplay)",
+                    "port": "\(vncPort)",
+                ])
+            let vncInfo = try await setupSession(
+                noDisplay: noDisplay, port: vncPort, sharedDirectories: sharedDirectories)
+            Logger.info(
+                "VNC setup successful", metadata: ["name": vmDirContext.name, "vncInfo": vncInfo])
 
             // Start the VM
             guard let service = virtualizationService else {
+                Logger.error("Virtualization service is nil", metadata: ["name": vmDirContext.name])
                 throw VMError.internalError("Virtualization service not initialized")
             }
+            Logger.info(
+                "Starting VM via virtualization service", metadata: ["name": vmDirContext.name])
             try await service.start()
+            Logger.info("VM started successfully", metadata: ["name": vmDirContext.name])
 
             while true {
                 try await Task.sleep(nanoseconds: UInt64(1e9))
             }
         } catch {
             Logger.error(
-                "Failed to create/start VM",
+                "Failed in VM.run",
                 metadata: [
-                    "error": "\(error)",
+                    "name": vmDirContext.name,
+                    "error": error.localizedDescription,
                     "errorType": "\(type(of: error))",
                 ])
             virtualizationService = nil
             vncService.stop()
+
             // Release lock
+            Logger.info("Releasing file lock after error", metadata: ["name": vmDirContext.name])
             flock(fileHandle.fileDescriptor, LOCK_UN)
             try? fileHandle.close()
+
+            // Additionally, perform our aggressive unlock to ensure no locks remain
+            Logger.info(
+                "Performing additional lock cleanup after error",
+                metadata: ["name": vmDirContext.name])
+            unlockConfigFile()
+
             throw error
         }
     }
@@ -219,34 +283,55 @@ class VM {
         // If we have a virtualization service, try to stop it cleanly first
         if let service = virtualizationService {
             do {
+                Logger.info(
+                    "Stopping VM via virtualization service", metadata: ["name": vmDirContext.name])
                 try await service.stop()
                 virtualizationService = nil
                 vncService.stop()
                 Logger.info(
                     "VM stopped successfully via virtualization service",
                     metadata: ["name": vmDirContext.name])
+
+                // Try to ensure any existing locks are released
+                Logger.info(
+                    "Attempting to clear any locks on config file",
+                    metadata: ["name": vmDirContext.name])
+                unlockConfigFile()
+
                 return
             } catch let error {
                 Logger.error(
-                    "Failed to stop VM via virtualization service, falling back to process termination",
+                    "Failed to stop VM via virtualization service",
                     metadata: [
                         "name": vmDirContext.name,
-                        "error": "\(error)",
+                        "error": error.localizedDescription,
                     ])
                 // Fall through to process termination
             }
         }
 
-        // Try to open config file to get file descriptor - note that this matches with the serve process - so this is only for the command line
+        // Try to open config file to get file descriptor
+        Logger.info(
+            "Attempting to access config file lock",
+            metadata: [
+                "path": vmDirContext.dir.configPath.path,
+                "name": vmDirContext.name,
+            ])
         let fileHandle = try? FileHandle(forReadingFrom: vmDirContext.dir.configPath.url)
         guard let fileHandle = fileHandle else {
-            Logger.error(
-                "Failed to open config file - VM not running", metadata: ["name": vmDirContext.name]
-            )
+            Logger.info(
+                "Failed to open config file - VM may not be running",
+                metadata: ["name": vmDirContext.name])
+
+            // Even though we couldn't open the file, try to force unlock anyway
+            unlockConfigFile()
+
             throw VMError.notRunning(vmDirContext.name)
         }
 
         // Get the PID of the process holding the lock using lsof command
+        Logger.info(
+            "Finding process holding lock on config file", metadata: ["name": vmDirContext.name])
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
         task.arguments = ["-F", "p", vmDirContext.dir.configPath.path]
@@ -263,28 +348,43 @@ class VM {
             let pid = pid_t(pidString)
         else {
             try? fileHandle.close()
-            Logger.error(
-                "Failed to find VM process - VM not running", metadata: ["name": vmDirContext.name])
+            Logger.info(
+                "Failed to find process holding lock - VM may not be running",
+                metadata: ["name": vmDirContext.name])
+
+            // Even though we couldn't find the process, try to force unlock
+            unlockConfigFile()
+
             throw VMError.notRunning(vmDirContext.name)
         }
 
+        Logger.info(
+            "Found process \(pid) holding lock on config file",
+            metadata: ["name": vmDirContext.name])
+
         // First try graceful shutdown with SIGINT
         if kill(pid, SIGINT) == 0 {
-            Logger.info(
-                "Sent SIGINT to VM process", metadata: ["name": vmDirContext.name, "pid": "\(pid)"])
+            Logger.info("Sent SIGINT to VM process \(pid)", metadata: ["name": vmDirContext.name])
         }
 
         // Wait for process to stop with timeout
         var attempts = 0
         while attempts < 10 {
+            Logger.info(
+                "Waiting for process \(pid) to terminate (attempt \(attempts + 1)/10)",
+                metadata: ["name": vmDirContext.name])
             try await Task.sleep(nanoseconds: 1_000_000_000)
 
             // Check if process still exists
             if kill(pid, 0) != 0 {
                 // Process is gone, do final cleanup
+                Logger.info("Process \(pid) has terminated", metadata: ["name": vmDirContext.name])
                 virtualizationService = nil
                 vncService.stop()
                 try? fileHandle.close()
+
+                // Force unlock the config file
+                unlockConfigFile()
 
                 Logger.info(
                     "VM stopped successfully via process termination",
@@ -296,8 +396,11 @@ class VM {
 
         // If graceful shutdown failed, force kill the process
         Logger.info(
-            "Graceful shutdown failed, forcing termination", metadata: ["name": vmDirContext.name])
+            "Graceful shutdown failed, forcing termination of process \(pid)",
+            metadata: ["name": vmDirContext.name])
         if kill(pid, SIGKILL) == 0 {
+            Logger.info("Sent SIGKILL to process \(pid)", metadata: ["name": vmDirContext.name])
+
             // Wait a moment for the process to be fully killed
             try await Task.sleep(nanoseconds: 2_000_000_000)
 
@@ -306,14 +409,122 @@ class VM {
             vncService.stop()
             try? fileHandle.close()
 
+            // Force unlock the config file
+            unlockConfigFile()
+
             Logger.info("VM forcefully stopped", metadata: ["name": vmDirContext.name])
             return
         }
 
         // If we get here, something went very wrong
         try? fileHandle.close()
-        Logger.error("Failed to stop VM", metadata: ["name": vmDirContext.name, "pid": "\(pid)"])
+        Logger.error(
+            "Failed to stop VM - could not terminate process \(pid)",
+            metadata: ["name": vmDirContext.name])
+
+        // As a last resort, try to force unlock
+        unlockConfigFile()
+
         throw VMError.internalError("Failed to stop VM process")
+    }
+
+    // Helper method to forcibly clear any locks on the config file
+    private func unlockConfigFile() {
+        Logger.info(
+            "Forcibly clearing locks on config file",
+            metadata: [
+                "path": vmDirContext.dir.configPath.path,
+                "name": vmDirContext.name,
+            ])
+
+        // First attempt: standard unlock methods
+        if let fileHandle = try? FileHandle(forWritingTo: vmDirContext.dir.configPath.url) {
+            // Use F_GETLK and F_SETLK to check and clear locks
+            var lockInfo = flock()
+            lockInfo.l_type = Int16(F_UNLCK)
+            lockInfo.l_whence = Int16(SEEK_SET)
+            lockInfo.l_start = 0
+            lockInfo.l_len = 0
+
+            // Try to unlock the file using fcntl
+            _ = fcntl(fileHandle.fileDescriptor, F_SETLK, &lockInfo)
+
+            // Also try the regular flock method
+            flock(fileHandle.fileDescriptor, LOCK_UN)
+
+            try? fileHandle.close()
+            Logger.info("Standard unlock attempts performed", metadata: ["name": vmDirContext.name])
+        }
+
+        // Second attempt: try to acquire and immediately release a fresh lock
+        if let tempHandle = try? FileHandle(forWritingTo: vmDirContext.dir.configPath.url) {
+            if flock(tempHandle.fileDescriptor, LOCK_EX | LOCK_NB) == 0 {
+                Logger.info(
+                    "Successfully acquired and released lock to reset state",
+                    metadata: ["name": vmDirContext.name])
+                flock(tempHandle.fileDescriptor, LOCK_UN)
+            } else {
+                Logger.info(
+                    "Could not acquire lock for resetting - may still be locked",
+                    metadata: ["name": vmDirContext.name])
+            }
+            try? tempHandle.close()
+        }
+
+        // Third attempt (most aggressive): copy the config file, remove the original, and restore
+        Logger.info(
+            "Trying aggressive method: backup and restore config file",
+            metadata: ["name": vmDirContext.name])
+        // Only proceed if the config file exists
+        let fileManager = FileManager.default
+        let configPath = vmDirContext.dir.configPath.path
+        let backupPath = configPath + ".backup"
+
+        if fileManager.fileExists(atPath: configPath) {
+            // Create a backup of the config file
+            if let configData = try? Data(contentsOf: URL(fileURLWithPath: configPath)) {
+                // Make backup
+                try? configData.write(to: URL(fileURLWithPath: backupPath))
+
+                // Remove the original file to clear all locks
+                try? fileManager.removeItem(atPath: configPath)
+                Logger.info(
+                    "Removed original config file to clear locks",
+                    metadata: ["name": vmDirContext.name])
+
+                // Wait a moment for OS to fully release resources
+                Thread.sleep(forTimeInterval: 0.1)
+
+                // Restore from backup
+                try? configData.write(to: URL(fileURLWithPath: configPath))
+                Logger.info(
+                    "Restored config file from backup", metadata: ["name": vmDirContext.name])
+            } else {
+                Logger.error(
+                    "Could not read config file content for backup",
+                    metadata: ["name": vmDirContext.name])
+            }
+        } else {
+            Logger.info(
+                "Config file does not exist, cannot perform aggressive unlock",
+                metadata: ["name": vmDirContext.name])
+        }
+
+        // Final check
+        if let finalHandle = try? FileHandle(forWritingTo: vmDirContext.dir.configPath.url) {
+            let lockResult = flock(finalHandle.fileDescriptor, LOCK_EX | LOCK_NB)
+            if lockResult == 0 {
+                Logger.info(
+                    "Lock successfully cleared - verified by acquiring test lock",
+                    metadata: ["name": vmDirContext.name])
+                flock(finalHandle.fileDescriptor, LOCK_UN)
+            } else {
+                Logger.info(
+                    "Lock still present after all clearing attempts",
+                    metadata: ["name": vmDirContext.name, "severity": "warning"])
+            }
+            try? finalHandle.close()
+        }
     }
 
     // MARK: - Resource Management
@@ -422,40 +633,44 @@ class VM {
         guard let url = vncService.url else {
             throw VMError.vncNotConfigured
         }
-        
+
         return url
     }
-    
+
     /// Saves the session information including shared directories to disk
     private func saveSessionData(url: String, sharedDirectories: [SharedDirectory]) {
         do {
-            let session = VNCSession(url: url, sharedDirectories: sharedDirectories.isEmpty ? nil : sharedDirectories)
+            let session = VNCSession(
+                url: url, sharedDirectories: sharedDirectories.isEmpty ? nil : sharedDirectories)
             try vmDirContext.dir.saveSession(session)
-            Logger.info("Saved VNC session with shared directories", 
-                       metadata: [
-                         "count": "\(sharedDirectories.count)", 
-                         "dirs": "\(sharedDirectories.map { $0.hostPath }.joined(separator: ", "))",
-                         "sessionsPath": "\(vmDirContext.dir.sessionsPath.path)"
-                       ])
+            Logger.info(
+                "Saved VNC session with shared directories",
+                metadata: [
+                    "count": "\(sharedDirectories.count)",
+                    "dirs": "\(sharedDirectories.map { $0.hostPath }.joined(separator: ", "))",
+                    "sessionsPath": "\(vmDirContext.dir.sessionsPath.path)",
+                ])
         } catch {
             Logger.error("Failed to save VNC session", metadata: ["error": "\(error)"])
         }
     }
-    
+
     /// Main session setup method that handles VNC and persists session data
-    private func setupSession(noDisplay: Bool, port: Int = 0, sharedDirectories: [SharedDirectory] = []) async throws -> String {
+    private func setupSession(
+        noDisplay: Bool, port: Int = 0, sharedDirectories: [SharedDirectory] = []
+    ) async throws -> String {
         // Start the VNC service and get the URL
         let url = try await startVNCService(port: port)
-        
+
         // Save the session data
         saveSessionData(url: url, sharedDirectories: sharedDirectories)
-        
+
         // Open the VNC client if needed
         if !noDisplay {
-            Logger.info("Starting VNC session")
+            Logger.info("Starting VNC session", metadata: ["name": vmDirContext.name])
             try await vncService.openClient(url: url)
         }
-        
+
         return url
     }
 
@@ -599,7 +814,8 @@ class VM {
             )
             virtualizationService = try virtualizationServiceFactory(config)
 
-            let vncInfo = try await setupSession(noDisplay: noDisplay, port: vncPort, sharedDirectories: sharedDirectories)
+            let vncInfo = try await setupSession(
+                noDisplay: noDisplay, port: vncPort, sharedDirectories: sharedDirectories)
             Logger.info("VNC info", metadata: ["vncInfo": vncInfo])
 
             // Start the VM
