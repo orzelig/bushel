@@ -68,7 +68,7 @@ final class Server {
     private var routes: [Route]
 
     // MARK: - Initialization
-    init(port: UInt16 = 3000) {
+    init(port: UInt16 = 7777) {
         self.port = NWEndpoint.Port(rawValue: port)!
         self.controller = LumeController()
         self.routes = []

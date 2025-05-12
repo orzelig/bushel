@@ -18,7 +18,7 @@ curl --connect-timeout 6000 \
       "ipsw": "latest",
       "storage": "ssd"
     }' \
-    http://localhost:3000/lume/vms
+    http://localhost:7777/lume/vms
 ```
 </details>
 
@@ -30,7 +30,7 @@ curl --connect-timeout 6000 \
 curl --connect-timeout 6000 \
   --max-time 5000 \
   -X POST \
-  http://localhost:3000/lume/vms/my-vm-name/run
+  http://localhost:7777/lume/vms/my-vm-name/run
 
 # Run with VNC client started and shared directory
 curl --connect-timeout 6000 \
@@ -48,7 +48,7 @@ curl --connect-timeout 6000 \
     "recoveryMode": false,
     "storage": "ssd"
   }' \
-  http://localhost:3000/lume/vms/lume_vm/run
+  http://localhost:7777/lume/vms/lume_vm/run
 ```
 </details>
 
@@ -58,7 +58,7 @@ curl --connect-timeout 6000 \
 ```bash
 curl --connect-timeout 6000 \
   --max-time 5000 \
-  http://localhost:3000/lume/vms
+  http://localhost:7777/lume/vms
 ```
 ```
 [
@@ -89,12 +89,12 @@ curl --connect-timeout 6000 \
 # Basic get
 curl --connect-timeout 6000 \
   --max-time 5000 \
-  http://localhost:3000/lume/vms/lume_vm
+  http://localhost:7777/lume/vms/lume_vm
 
 # Get with storage location specified
 curl --connect-timeout 6000 \
   --max-time 5000 \
-  http://localhost:3000/lume/vms/lume_vm?storage=ssd
+  http://localhost:7777/lume/vms/lume_vm?storage=ssd
 ```
 ```
 {
@@ -122,7 +122,7 @@ curl --connect-timeout 6000 \
     "diskSize": "128GB",
     "storage": "ssd"
   }' \
-  http://localhost:3000/lume/vms/my-vm-name
+  http://localhost:7777/lume/vms/my-vm-name
 ```
 </details>
 
@@ -134,13 +134,13 @@ curl --connect-timeout 6000 \
 curl --connect-timeout 6000 \
   --max-time 5000 \
   -X POST \
-  http://localhost:3000/lume/vms/my-vm-name/stop
+  http://localhost:7777/lume/vms/my-vm-name/stop
 
 # Stop with storage location specified
 curl --connect-timeout 6000 \
   --max-time 5000 \
   -X POST \
-  http://localhost:3000/lume/vms/my-vm-name/stop?storage=ssd
+  http://localhost:7777/lume/vms/my-vm-name/stop?storage=ssd
 ```
 </details>
 
@@ -152,13 +152,13 @@ curl --connect-timeout 6000 \
 curl --connect-timeout 6000 \
   --max-time 5000 \
   -X DELETE \
-  http://localhost:3000/lume/vms/my-vm-name
+  http://localhost:7777/lume/vms/my-vm-name
 
 # Delete with storage location specified
 curl --connect-timeout 6000 \
   --max-time 5000 \
   -X DELETE \
-  http://localhost:3000/lume/vms/my-vm-name?storage=ssd
+  http://localhost:7777/lume/vms/my-vm-name?storage=ssd
 ```
 </details>
 
@@ -177,7 +177,7 @@ curl --connect-timeout 6000 \
     "organization": "trycua",
     "storage": "ssd"
   }' \
-  http://localhost:3000/lume/pull
+  http://localhost:7777/lume/pull
 ```
 
 ```bash
@@ -189,7 +189,7 @@ curl --connect-timeout 6000 \
     "image": "macos-sequoia-vanilla:15.2",
     "name": "macos-sequoia-vanilla"
   }' \
-  http://localhost:3000/lume/pull
+  http://localhost:7777/lume/pull
 ```
 </details>
 
@@ -211,7 +211,7 @@ curl --connect-timeout 6000 \
     "chunkSizeMb": 512,
     "storage": null 
   }' \
-  http://localhost:3000/lume/vms/push 
+  http://localhost:7777/lume/vms/push 
 ```
 
 **Response (202 Accepted):**
@@ -243,7 +243,7 @@ curl --connect-timeout 6000 \
     "sourceLocation": "default",
     "destLocation": "ssd"
   }' \
-  http://localhost:3000/lume/vms/clone
+  http://localhost:7777/lume/vms/clone
 ```
 </details>
 
@@ -253,7 +253,7 @@ curl --connect-timeout 6000 \
 ```bash
 curl --connect-timeout 6000 \
   --max-time 5000 \
-  http://localhost:3000/lume/ipsw
+  http://localhost:7777/lume/ipsw
 ```
 </details>
 
@@ -264,7 +264,7 @@ curl --connect-timeout 6000 \
 # List images with default organization (trycua)
 curl --connect-timeout 6000 \
   --max-time 5000 \
-  http://localhost:3000/lume/images
+  http://localhost:7777/lume/images
 ```
 
 ```json
@@ -284,7 +284,7 @@ curl --connect-timeout 6000 \
 curl --connect-timeout 6000 \
   --max-time 5000 \
   -X POST \
-  http://localhost:3000/lume/prune
+  http://localhost:7777/lume/prune
 ```
 </details>
 
@@ -294,7 +294,7 @@ curl --connect-timeout 6000 \
 ```bash
 curl --connect-timeout 6000 \
   --max-time 5000 \
-  http://localhost:3000/lume/config
+  http://localhost:7777/lume/config
 ```
 
 ```json
@@ -319,7 +319,7 @@ curl --connect-timeout 6000 \
     "cacheDirectory": "~/custom/lume/cache",
     "cachingEnabled": true
   }' \
-  http://localhost:3000/lume/config
+  http://localhost:7777/lume/config
 ```
 </details>
 
@@ -329,7 +329,7 @@ curl --connect-timeout 6000 \
 ```bash
 curl --connect-timeout 6000 \
   --max-time 5000 \
-  http://localhost:3000/lume/config/locations
+  http://localhost:7777/lume/config/locations
 ```
 
 ```json
@@ -360,7 +360,7 @@ curl --connect-timeout 6000 \
     "name": "ssd",
     "path": "/Volumes/SSD/lume/vms"
   }' \
-  http://localhost:3000/lume/config/locations
+  http://localhost:7777/lume/config/locations
 ```
 </details>
 
@@ -371,7 +371,7 @@ curl --connect-timeout 6000 \
 curl --connect-timeout 6000 \
   --max-time 5000 \
   -X DELETE \
-  http://localhost:3000/lume/config/locations/ssd
+  http://localhost:7777/lume/config/locations/ssd
 ```
 </details>
 
@@ -382,6 +382,6 @@ curl --connect-timeout 6000 \
 curl --connect-timeout 6000 \
   --max-time 5000 \
   -X POST \
-  http://localhost:3000/lume/config/locations/default/ssd
+  http://localhost:7777/lume/config/locations/default/ssd
 ```
 </details>

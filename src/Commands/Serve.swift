@@ -7,7 +7,7 @@ struct Serve: AsyncParsableCommand {
     )
     
     @Option(help: "Port to listen on")
-    var port: UInt16 = 3000
+    var port: UInt16 = 7777
     
     func run() async throws {
         let server = await Server(port: port)

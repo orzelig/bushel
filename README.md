@@ -136,7 +136,7 @@ Command Options:
       set <boolean>      Enable or disable image caching
 
   serve:
-    --port <port>        Port to listen on (default: 3000)
+    --port <port>        Port to listen on (default: 7777)
 ```
 
 ## Install
@@ -178,7 +178,7 @@ For additional disk space, resize the VM disk after pulling the image using the 
 
 ## Local API Server
   
-`lume` exposes a local HTTP API server that listens on `http://localhost:3000/lume`, enabling automated management of VMs.
+`lume` exposes a local HTTP API server that listens on `http://localhost:7777/lume`, enabling automated management of VMs.
 
 ```bash
 lume serve
