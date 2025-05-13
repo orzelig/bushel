@@ -246,6 +246,27 @@ final class DarwinVirtualizationService: BaseVirtualizationService {
         ]
         vzConfig.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
         vzConfig.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
+        
+        // Audio configuration
+        let soundDeviceConfiguration = VZVirtioSoundDeviceConfiguration()
+        let inputAudioStreamConfiguration = VZVirtioSoundDeviceInputStreamConfiguration()
+        let outputAudioStreamConfiguration = VZVirtioSoundDeviceOutputStreamConfiguration()
+        
+        inputAudioStreamConfiguration.source = VZHostAudioInputStreamSource()
+        outputAudioStreamConfiguration.sink = VZHostAudioOutputStreamSink()
+        
+        soundDeviceConfiguration.streams = [inputAudioStreamConfiguration, outputAudioStreamConfiguration]
+        vzConfig.audioDevices = [soundDeviceConfiguration]
+        
+        // Clipboard sharing via Spice agent
+        let spiceAgentConsoleDevice = VZVirtioConsoleDeviceConfiguration()
+        let spiceAgentPort = VZVirtioConsolePortConfiguration()
+        spiceAgentPort.name = VZSpiceAgentPortAttachment.spiceAgentPortName
+        let spiceAgentPortAttachment = VZSpiceAgentPortAttachment()
+        spiceAgentPortAttachment.sharesClipboard = true
+        spiceAgentPort.attachment = spiceAgentPortAttachment
+        spiceAgentConsoleDevice.ports[0] = spiceAgentPort
+        vzConfig.consoleDevices.append(spiceAgentConsoleDevice)
 
         // Directory sharing
         let directorySharingDevices = createDirectorySharingDevices(
@@ -376,6 +397,27 @@ final class LinuxVirtualizationService: BaseVirtualizationService {
         ]
         vzConfig.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
         vzConfig.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
+        
+        // Audio configuration
+        let soundDeviceConfiguration = VZVirtioSoundDeviceConfiguration()
+        let inputAudioStreamConfiguration = VZVirtioSoundDeviceInputStreamConfiguration()
+        let outputAudioStreamConfiguration = VZVirtioSoundDeviceOutputStreamConfiguration()
+        
+        inputAudioStreamConfiguration.source = VZHostAudioInputStreamSource()
+        outputAudioStreamConfiguration.sink = VZHostAudioOutputStreamSink()
+        
+        soundDeviceConfiguration.streams = [inputAudioStreamConfiguration, outputAudioStreamConfiguration]
+        vzConfig.audioDevices = [soundDeviceConfiguration]
+
+        // Clipboard sharing via Spice agent
+        let spiceAgentConsoleDevice = VZVirtioConsoleDeviceConfiguration()
+        let spiceAgentPort = VZVirtioConsolePortConfiguration()
+        spiceAgentPort.name = VZSpiceAgentPortAttachment.spiceAgentPortName
+        let spiceAgentPortAttachment = VZSpiceAgentPortAttachment()
+        spiceAgentPortAttachment.sharesClipboard = true
+        spiceAgentPort.attachment = spiceAgentPortAttachment
+        spiceAgentConsoleDevice.ports[0] = spiceAgentPort
+        vzConfig.consoleDevices.append(spiceAgentConsoleDevice)
 
         // Directory sharing
         var directorySharingDevices = createDirectorySharingDevices(
