@@ -512,6 +512,24 @@ class ImageContainerRegistry: @unchecked Sendable {
             return false
         }
 
+        // Check if we have a reassembled image
+        let reassembledCachePath = getImageCacheDirectory(manifestId: manifestId)
+            .appendingPathComponent("disk.img.reassembled")
+        if FileManager.default.fileExists(atPath: reassembledCachePath.path) {
+            Logger.info("Found reassembled disk image in cache validation")
+
+            // If we have a reassembled image, we only need to make sure the manifest matches
+            guard let cachedManifest = loadCachedManifest(manifestId: manifestId),
+                cachedManifest.layers == manifest.layers
+            else {
+                return false
+            }
+
+            // We have a reassembled image and the manifest matches
+            return true
+        }
+
+        // If no reassembled image, check layer files
         // First check if manifest exists and matches
         guard let cachedManifest = loadCachedManifest(manifestId: manifestId),
             cachedManifest.layers == manifest.layers
@@ -612,6 +630,52 @@ class ImageContainerRegistry: @unchecked Sendable {
                 let metadata = try? JSONDecoder().decode(ImageMetadata.self, from: metadataData)
             {
                 if metadata.image == image {
+                    // Before removing, check if there's a reassembled image we should preserve
+                    let reassembledPath = itemPath.appendingPathComponent("disk.img.reassembled")
+                    let nvramPath = itemPath.appendingPathComponent("nvram.bin")
+                    let configPath = itemPath.appendingPathComponent("config.json")
+
+                    // Preserve reassembled image if it exists
+                    if FileManager.default.fileExists(atPath: reassembledPath.path) {
+                        Logger.info(
+                            "Preserving reassembled disk image during cleanup",
+                            metadata: ["manifest_id": item])
+
+                        // Ensure the current cache directory exists
+                        let currentCacheDir = getImageCacheDirectory(manifestId: currentManifestId)
+                        try FileManager.default.createDirectory(
+                            at: currentCacheDir, withIntermediateDirectories: true)
+
+                        // Move reassembled image to current cache directory
+                        let currentReassembledPath = currentCacheDir.appendingPathComponent(
+                            "disk.img.reassembled")
+                        if !FileManager.default.fileExists(atPath: currentReassembledPath.path) {
+                            try FileManager.default.copyItem(
+                                at: reassembledPath, to: currentReassembledPath)
+                        }
+
+                        // Also preserve nvram if it exists
+                        if FileManager.default.fileExists(atPath: nvramPath.path) {
+                            let currentNvramPath = currentCacheDir.appendingPathComponent(
+                                "nvram.bin")
+                            if !FileManager.default.fileExists(atPath: currentNvramPath.path) {
+                                try FileManager.default.copyItem(
+                                    at: nvramPath, to: currentNvramPath)
+                            }
+                        }
+
+                        // Also preserve config if it exists
+                        if FileManager.default.fileExists(atPath: configPath.path) {
+                            let currentConfigPath = currentCacheDir.appendingPathComponent(
+                                "config.json")
+                            if !FileManager.default.fileExists(atPath: currentConfigPath.path) {
+                                try FileManager.default.copyItem(
+                                    at: configPath, to: currentConfigPath)
+                            }
+                        }
+                    }
+
+                    // Now remove the old directory
                     try FileManager.default.removeItem(at: itemPath)
                     Logger.info(
                         "Removed old version of image",
@@ -652,10 +716,12 @@ class ImageContainerRegistry: @unchecked Sendable {
 
         // Use provided name or derive from image
         let vmName = name ?? image.split(separator: ":").first.map(String.init) ?? ""
-        
+
         // Determine if locationName is a direct path or a named storage location
         let vmDir: VMDirectory
-        if let locationName = locationName, locationName.contains("/") || locationName.contains("\\") {
+        if let locationName = locationName,
+            locationName.contains("/") || locationName.contains("\\")
+        {
             // Direct path
             vmDir = try home.getVMDirectoryFromPath(vmName, storagePath: locationName)
         } else {
@@ -1417,9 +1483,85 @@ class ImageContainerRegistry: @unchecked Sendable {
         let outputURL = destination.appendingPathComponent("disk.img")
         var expectedTotalSize: UInt64? = nil  // Use optional to handle missing config
 
+        // Define the path for the reassembled cache image
+        let cacheDir = getImageCacheDirectory(manifestId: manifestId)
+        let reassembledCachePath = cacheDir.appendingPathComponent("disk.img.reassembled")
+        let nvramCachePath = cacheDir.appendingPathComponent("nvram.bin")
+
+        // First check if we already have a reassembled image in the cache
+        if FileManager.default.fileExists(atPath: reassembledCachePath.path) {
+            Logger.info("Found reassembled disk image in cache, using it directly")
+
+            // Copy reassembled disk image
+            try FileManager.default.copyItem(at: reassembledCachePath, to: outputURL)
+
+            // Copy nvram if it exists
+            if FileManager.default.fileExists(atPath: nvramCachePath.path) {
+                try FileManager.default.copyItem(
+                    at: nvramCachePath,
+                    to: destination.appendingPathComponent("nvram.bin")
+                )
+                Logger.info("Using cached nvram.bin file")
+            } else {
+                // Look for nvram in layer cache if needed
+                let nvramLayers = manifest.layers.filter {
+                    $0.mediaType == "application/octet-stream"
+                }
+                if let nvramLayer = nvramLayers.first {
+                    let cachedNvram = getCachedLayerPath(
+                        manifestId: manifestId, digest: nvramLayer.digest)
+                    if FileManager.default.fileExists(atPath: cachedNvram.path) {
+                        try FileManager.default.copyItem(
+                            at: cachedNvram,
+                            to: destination.appendingPathComponent("nvram.bin")
+                        )
+                        // Also save it to the dedicated nvram location for future use
+                        try FileManager.default.copyItem(at: cachedNvram, to: nvramCachePath)
+                        Logger.info("Recovered nvram.bin from layer cache")
+                    }
+                }
+            }
+
+            // Copy config if it exists
+            let configCachePath = cacheDir.appendingPathComponent("config.json")
+            if FileManager.default.fileExists(atPath: configCachePath.path) {
+                try FileManager.default.copyItem(
+                    at: configCachePath,
+                    to: destination.appendingPathComponent("config.json")
+                )
+                Logger.info("Using cached config.json file")
+            } else {
+                // Look for config in layer cache if needed
+                let configLayers = manifest.layers.filter {
+                    $0.mediaType == "application/vnd.oci.image.config.v1+json"
+                }
+                if let configLayer = configLayers.first {
+                    let cachedConfig = getCachedLayerPath(
+                        manifestId: manifestId, digest: configLayer.digest)
+                    if FileManager.default.fileExists(atPath: cachedConfig.path) {
+                        try FileManager.default.copyItem(
+                            at: cachedConfig,
+                            to: destination.appendingPathComponent("config.json")
+                        )
+                        // Also save it to the dedicated config location for future use
+                        try FileManager.default.copyItem(at: cachedConfig, to: configCachePath)
+                        Logger.info("Recovered config.json from layer cache")
+                    }
+                }
+            }
+
+            Logger.info("Cache copy complete using reassembled image")
+            return
+        }
+
+        // If we don't have a reassembled image, proceed with legacy part handling
+        Logger.info("No reassembled image found, using part-based reassembly")
+
         // Instantiate collector
         let diskPartsCollector = DiskPartsCollector()
         var lz4LayerCount = 0  // Count lz4 layers found
+        var hasNvram = false
+        var configPath: URL? = nil
 
         // First identify disk parts and non-disk files
         for layer in manifest.layers {
@@ -1447,9 +1589,13 @@ class ImageContainerRegistry: @unchecked Sendable {
                 switch layer.mediaType {
                 case "application/vnd.oci.image.config.v1+json":
                     fileName = "config.json"
+                    configPath = cachedLayer
                 case "application/octet-stream":
                     // Assume nvram if config layer exists, otherwise assume single disk image
                     fileName = manifest.config != nil ? "nvram.bin" : "disk.img"
+                    if fileName == "nvram.bin" {
+                        hasNvram = true
+                    }
                 case "application/vnd.oci.image.layer.v1.tar",
                     "application/octet-stream+gzip":
                     // Assume disk image for these types as well if encountered in cache scenario
@@ -1699,6 +1845,89 @@ class ImageContainerRegistry: @unchecked Sendable {
                 chmodProcess.arguments = ["0644", outputURL.path]
                 try chmodProcess.run()
                 chmodProcess.waitUntilExit()
+            }
+
+            // After successful reassembly, store the reassembled image in the cache
+            if cachingEnabled {
+                Logger.info("Saving reassembled disk image to cache for future use")
+
+                // Copy the reassembled disk image to the cache
+                try FileManager.default.copyItem(at: outputURL, to: reassembledCachePath)
+
+                // Clean up disk parts after successful reassembly
+                Logger.info("Cleaning up disk part files from cache")
+
+                // Use an array to track unique file paths to avoid trying to delete the same file multiple times
+                var processedPaths: [String] = []
+
+                for (_, partURL) in diskPartSources {
+                    let path = partURL.path
+
+                    // Skip if we've already processed this exact path
+                    if processedPaths.contains(path) {
+                        Logger.info("Skipping duplicate part file: \(partURL.lastPathComponent)")
+                        continue
+                    }
+
+                    // Add to processed array
+                    processedPaths.append(path)
+
+                    // Check if file exists before attempting to delete
+                    if FileManager.default.fileExists(atPath: path) {
+                        do {
+                            try FileManager.default.removeItem(at: partURL)
+                            Logger.info("Removed disk part: \(partURL.lastPathComponent)")
+                        } catch {
+                            Logger.info(
+                                "Failed to remove disk part: \(partURL.lastPathComponent) - \(error.localizedDescription)"
+                            )
+                        }
+                    } else {
+                        Logger.info("Disk part already removed: \(partURL.lastPathComponent)")
+                    }
+                }
+
+                // Also save nvram if we have it
+                if hasNvram {
+                    let srcNvram = destination.appendingPathComponent("nvram.bin")
+                    if FileManager.default.fileExists(atPath: srcNvram.path) {
+                        try? FileManager.default.copyItem(at: srcNvram, to: nvramCachePath)
+                    }
+                }
+
+                // Save config.json in the cache for future use if it exists
+                if let configPath = configPath {
+                    let cacheConfigPath = cacheDir.appendingPathComponent("config.json")
+                    try? FileManager.default.copyItem(at: configPath, to: cacheConfigPath)
+                }
+
+                // Perform a final cleanup to catch any leftover part files
+                Logger.info("Performing final cleanup of any remaining part files")
+                do {
+                    let cacheContents = try FileManager.default.contentsOfDirectory(
+                        at: cacheDir, includingPropertiesForKeys: nil)
+
+                    for item in cacheContents {
+                        let fileName = item.lastPathComponent
+                        // Only remove sha256_ files that aren't the reassembled image, nvram or config
+                        if fileName.starts(with: "sha256_") && fileName != "disk.img.reassembled"
+                            && fileName != "nvram.bin" && fileName != "config.json"
+                            && fileName != "manifest.json" && fileName != "metadata.json"
+                        {
+                            do {
+                                try FileManager.default.removeItem(at: item)
+                                Logger.info(
+                                    "Removed leftover file during final cleanup: \(fileName)")
+                            } catch {
+                                Logger.info(
+                                    "Failed to remove leftover file: \(fileName) - \(error.localizedDescription)"
+                                )
+                            }
+                        }
+                    }
+                } catch {
+                    Logger.info("Error during final cleanup: \(error.localizedDescription)")
+                }
             }
         }
 
