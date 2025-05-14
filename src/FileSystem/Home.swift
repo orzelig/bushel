@@ -87,7 +87,14 @@ final class Home {
             let baseDir = Path(cleanPath)
             return VMDirectory(baseDir.directory(name))
         }
-        
+
+        // Check if storage is a direct path
+        if let storage = storage, (storage.contains("/") || storage.contains("\\")) {
+            let cleanPath = storage.hasSuffix("/") ? String(storage.dropLast()) : storage
+            let baseDir = Path(cleanPath)
+            return VMDirectory(baseDir.directory(name))
+        }
+
         let location: VMLocation
 
         if let storage = storage {
