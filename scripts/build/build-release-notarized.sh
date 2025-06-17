@@ -89,24 +89,33 @@ if [ "$LOG_LEVEL" = "minimal" ] || [ "$LOG_LEVEL" = "none" ]; then
       --password "${APP_SPECIFIC_PASSWORD}" \
       --wait 2>&1)
   
-  # Just show success or failure
+  # Check if notarization was successful
   if echo "$NOTARY_OUTPUT" | grep -q "status: Accepted"; then
     log "essential" "Notarization successful!"
   else
     log "error" "Notarization failed. Please check logs."
+    log "error" "Notarization output:"
+    echo "$NOTARY_OUTPUT"
+    exit 1
   fi
 else
   # Normal verbose output
-  xcrun notarytool submit ./.release/lume.pkg \
+  if ! xcrun notarytool submit ./.release/lume.pkg \
       --apple-id "${APPLE_ID}" \
       --team-id "${TEAM_ID}" \
       --password "${APP_SPECIFIC_PASSWORD}" \
-      --wait
+      --wait; then
+    log "error" "Notarization failed"
+    exit 1
+  fi
 fi
 
 # Staple the notarization ticket
 log "essential" "Stapling notarization ticket..."
-xcrun stapler staple ./.release/lume.pkg > /dev/null 2>&1
+if ! xcrun stapler staple ./.release/lume.pkg > /dev/null 2>&1; then
+  log "error" "Failed to staple notarization ticket"
+  exit 1
+fi
 
 # Create temporary directory for package extraction
 EXTRACT_ROOT=$(mktemp -d)
