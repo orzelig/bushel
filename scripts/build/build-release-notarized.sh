@@ -72,12 +72,23 @@ cp -f .build/release/lume "$TEMP_ROOT/usr/local/bin/"
 
 # Build the installer package
 log "essential" "Building installer package..."
-pkgbuild --root "$TEMP_ROOT" \
+if ! pkgbuild --root "$TEMP_ROOT" \
          --identifier "com.trycua.lume" \
          --version "1.0" \
          --install-location "/" \
          --sign "$CERT_INSTALLER_NAME" \
-         ./.release/lume.pkg 2> /dev/null
+         ./.release/lume.pkg; then
+    log "error" "Failed to build installer package"
+    exit 1
+fi
+
+# Verify the package was created
+if [ ! -f "./.release/lume.pkg" ]; then
+    log "error" "Package file ./.release/lume.pkg was not created"
+    exit 1
+fi
+
+log "essential" "Package created successfully"
 
 # Submit for notarization using stored credentials
 log "essential" "Submitting for notarization..."
