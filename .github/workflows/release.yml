@@ -1,0 +1,97 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so release notes pull from the right base
+
+      - name: Show toolchain versions
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Stage tarball contents
+        run: |
+          set -euo pipefail
+          BUILD_DIR=.build/arm64-apple-macosx/release
+          STAGE=stage
+          mkdir -p "$STAGE"
+          # Binary
+          cp "$BUILD_DIR/bushel" "$STAGE/"
+          # SPM-generated resource bundle. Must ship adjacent to the binary —
+          # Bundle.module resolves resources relative to the executable's
+          # location, and our unattended-install presets live inside it.
+          if [ -d "$BUILD_DIR/bushel_bushel.bundle" ]; then
+            cp -R "$BUILD_DIR/bushel_bushel.bundle" "$STAGE/"
+          else
+            echo "::error::bushel_bushel.bundle missing from build output"
+            exit 1
+          fi
+          ls -la "$STAGE"
+
+      - name: Create tarball
+        run: |
+          set -euo pipefail
+          # tar -C stage . produces a flat-rooted archive (no leading 'stage/').
+          # Layout matches what scripts/install.sh expects.
+          tar -czf bushel-darwin-arm64.tar.gz -C stage .
+          ls -la bushel-darwin-arm64.tar.gz
+          tar -tzf bushel-darwin-arm64.tar.gz | head -20
+
+      - name: Compute SHA-256
+        id: sha
+        run: |
+          shasum -a 256 bushel-darwin-arm64.tar.gz | tee bushel-darwin-arm64.tar.gz.sha256
+          echo "value=$(awk '{print $1}' bushel-darwin-arm64.tar.gz.sha256)" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ steps.sha.outputs.value }}
+        run: |
+          set -euo pipefail
+          # If the release already exists (rare; usually a re-tag), just
+          # upload the asset. Otherwise create it with auto-generated notes.
+          if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
+            echo "Release $TAG already exists; uploading asset."
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              --notes "$(cat <<EOF
+            **bushel $TAG** — Apple Silicon (arm64) macOS
+
+            ## Install
+
+            \`\`\`
+            /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/orzelig/bushel/main/scripts/install.sh)"
+            \`\`\`
+
+            See [README.md](https://github.com/orzelig/bushel/blob/main/README.md) for usage and [UPSTREAM-STATUS.md](https://github.com/orzelig/bushel/blob/main/UPSTREAM-STATUS.md) for the relationship to upstream lume.
+
+            ## Asset
+
+            \`bushel-darwin-arm64.tar.gz\` — sha256: \`$SHA\`
+            EOF
+            )"
+          fi
+          gh release upload "$TAG" \
+            bushel-darwin-arm64.tar.gz \
+            bushel-darwin-arm64.tar.gz.sha256 \
+            --clobber
