@@ -17,8 +17,10 @@ This file tracks the relationship to upstream: what we've vendored, what we're c
 |---|---|---|---|
 | [trycua/cua#1395](https://github.com/trycua/cua/pull/1395) | fix(lume): pull 21GB OCI tar-part images without skipping disk layers | `442c116` | Applied |
 | [trycua/cua#1441](https://github.com/trycua/cua/pull/1441) | fix(lume): update tahoe unattended preset for macOS 26 Setup Assistant changes | `968fb0f` | Applied |
+| [trycua/cua#1436](https://github.com/trycua/cua/pull/1436) | Fix force unwrap crash on optional macAddress in VM context creation | `9be87e7` | Applied |
+| [trycua/cua#1254](https://github.com/trycua/cua/pull/1254) | fix(lume): handle guest-initiated VM shutdown via VZVirtualMachineDelegate | `4a5982f` | Applied |
 
-Both PRs remain open upstream. If they merge upstream, the bushel commits will be reconciled (likely a no-op rebase).
+All four PRs remain open upstream. If any merge upstream, the corresponding bushel commit will be reconciled (typically a no-op rebase).
 
 ## Upstream issues fixed in bushel
 
@@ -28,6 +30,7 @@ These upstream issues are resolved on bushel `main`. If you hit one of them on s
 |---|---|---|
 | [trycua/cua#1102](https://github.com/trycua/cua/issues/1102) | lume pull skips multi-part tar layers, fails to assemble disk image | Applied #1395 |
 | [trycua/cua#1440](https://github.com/trycua/cua/issues/1440) | unattended tahoe preset fails on macOS 26.4.1: 'Set Up Later' button renamed to 'Skip' | Applied #1441 |
+| [trycua/cua#1184](https://github.com/trycua/cua/issues/1184) | Guest-initiated shutdown leaves VM process running | Applied #1254 |
 
 ## Open upstream PRs under evaluation
 
@@ -35,8 +38,6 @@ These look worth vendoring; not yet applied. Evaluation order is rough; please o
 
 | Upstream PR | Title | Notes |
 |---|---|---|
-| [trycua/cua#1254](https://github.com/trycua/cua/pull/1254) | fix(lume): handle guest-initiated VM shutdown via VZVirtualMachineDelegate | Would resolve upstream issue #1184 |
-| [trycua/cua#1436](https://github.com/trycua/cua/pull/1436) | Fix force unwrap crash on optional macAddress in VM context creation | Small bugfix, low risk |
 | [trycua/cua#941](https://github.com/trycua/cua/pull/941) | feat(lume): add `compact` and `expand` | Feature add; needs review for scope fit |
 | [trycua/cua#1082](https://github.com/trycua/cua/pull/1082) | feat(lume): add option to specify custom config file path | Feature add; small surface |
 
@@ -49,7 +50,6 @@ Tracking these for visibility — they're known limitations that bushel hasn't t
 - [trycua/cua#75](https://github.com/trycua/cua/issues/75) — NoVNC support
 - [trycua/cua#925](https://github.com/trycua/cua/issues/925) — Allow disk image resize (shrink)
 - [trycua/cua#1133](https://github.com/trycua/cua/issues/1133) — Bridge network failed in homebrew release
-- [trycua/cua#1184](https://github.com/trycua/cua/issues/1184) — Guest-initiated shutdown leaves VM process running
 
 ## Reporting bushel-specific issues
 
