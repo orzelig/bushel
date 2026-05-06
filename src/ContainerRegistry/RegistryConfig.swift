@@ -71,11 +71,11 @@ public enum RegistryConfigError: Error, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .gcsConfigMissing:
-            return "GCS registry type selected but GCS configuration is missing. Run 'lume config set registry.gcs.api_url <url>' and 'lume config set registry.gcs.api_key <key>'"
+            return "GCS registry type selected but GCS configuration is missing. Run 'bushel config set registry.gcs.api_url <url>' and 'bushel config set registry.gcs.api_key <key>'"
         case .invalidApiUrl(let url):
             return "Invalid API URL: \(url)"
         case .missingApiKey:
-            return "API key is required for GCS registry. Run 'lume config set registry.gcs.api_key <key>'"
+            return "API key is required for GCS registry. Run 'bushel config set registry.gcs.api_key <key>'"
         }
     }
 }

@@ -9,7 +9,7 @@ extension Bundle {
     /// (the .app root), which doesn't match `Contents/Resources/` in a .app bundle.
     /// This accessor checks `resourceURL` first, then `bundleURL`, then the build path.
     static let lumeResources: Bundle = {
-        let bundleName = "lume_lume.bundle"
+        let bundleName = "bushel_bushel.bundle"
 
         // 1. .app bundle: Contents/Resources/
         if let resourceURL = Bundle.main.resourceURL {

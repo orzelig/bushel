@@ -1332,7 +1332,7 @@ class ImageContainerRegistry: ImageRegistry, @unchecked Sendable {
             "Note: Actual disk usage is significantly lower than reported size due to macOS sparse file system"
         )
         Logger.debug(
-            "Run 'lume run \(vmName)' to reduce the disk image file size by using macOS sparse file system"
+            "Run 'bushel run \(vmName)' to reduce the disk image file size by using macOS sparse file system"
         )
         return vmDir
     }

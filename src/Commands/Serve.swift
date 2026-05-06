@@ -45,7 +45,7 @@ struct Serve: AsyncParsableCommand {
                 // Create a user-friendly error message that includes the suggestion
                 let message = """
                 \(error.localizedDescription)
-                Try using a different port: lume serve --port \(suggestedPort)
+                Try using a different port: bushel serve --port \(suggestedPort)
                 """
 
                 // Log the message (without the "ERROR:" prefix that ArgumentParser will add)

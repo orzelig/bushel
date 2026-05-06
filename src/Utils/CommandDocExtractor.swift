@@ -57,7 +57,7 @@ enum CommandDocExtractor {
     /// Extract documentation from all registered commands
     static func extractAll() -> CLIDocumentation {
         return CLIDocumentation(
-            name: "lume",
+            name: "bushel",
             version: Lume.Version.current,
             abstract: "A lightweight CLI and local API server to build, run and manage macOS VMs.",
             commands: allCommandDocs
@@ -399,7 +399,7 @@ enum CommandDocExtractor {
     private static var configDoc: CommandDoc {
         CommandDoc(
             name: "config",
-            abstract: "Get or set lume configuration",
+            abstract: "Get or set bushel configuration",
             discussion: nil,
             arguments: [],
             options: [],
@@ -472,7 +472,7 @@ enum CommandDocExtractor {
     private static var logsDoc: CommandDoc {
         CommandDoc(
             name: "logs",
-            abstract: "View lume serve logs",
+            abstract: "View bushel serve logs",
             discussion: nil,
             arguments: [],
             options: [],

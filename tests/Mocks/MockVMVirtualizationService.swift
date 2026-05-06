@@ -1,6 +1,6 @@
 import Foundation
 import Virtualization
-@testable import lume
+@testable import bushel
 
 @MainActor
 final class MockVMVirtualizationService: VMVirtualizationService {

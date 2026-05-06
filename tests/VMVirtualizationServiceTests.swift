@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 import Virtualization
-@testable import lume
+@testable import bushel
 
 @Test("VMVirtualizationService starts correctly")
 func testVMVirtualizationServiceStart() async throws {

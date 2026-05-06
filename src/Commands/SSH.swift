@@ -14,9 +14,9 @@ struct SSH: AsyncParsableCommand {
             lume/lume by default.
 
             Examples:
-              lume ssh my-vm                       # Interactive shell
-              lume ssh my-vm "ls -la"              # Execute command
-              lume ssh my-vm "cd /app && npm test" # Execute complex command
+              bushel ssh my-vm                       # Interactive shell
+              bushel ssh my-vm "ls -la"              # Execute command
+              bushel ssh my-vm "cd /app && npm test" # Execute complex command
             """
     )
 

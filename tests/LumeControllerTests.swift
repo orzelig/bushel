@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import lume
+@testable import bushel
 
 private enum TestCreateError: Error {
     case setupFailed

@@ -3,7 +3,7 @@ import Foundation
 
 struct Logs: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "View lume serve logs",
+        abstract: "View bushel serve logs",
         subcommands: [Info.self, Error.self, All.self],
         defaultSubcommand: All.self
     )

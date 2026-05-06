@@ -12,10 +12,10 @@ struct DumpDocs: ParsableCommand {
             generating documentation or building integrations.
 
             Examples:
-              lume dump-docs                    # Output CLI docs
-              lume dump-docs --type api         # Output HTTP API docs
-              lume dump-docs --type all         # Output both CLI and API docs
-              lume dump-docs --pretty           # Pretty-print output
+              bushel dump-docs                    # Output CLI docs
+              bushel dump-docs --type api         # Output HTTP API docs
+              bushel dump-docs --type all         # Output both CLI and API docs
+              bushel dump-docs --pretty           # Pretty-print output
             """
     )
 

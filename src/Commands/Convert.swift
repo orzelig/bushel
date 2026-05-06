@@ -9,7 +9,7 @@ struct Convert: AsyncParsableCommand {
             under a new name/tag, then removes the temporary local VM.
 
             Example:
-              lume convert macos-sequoia:latest trycua/macos-sequoia:latest-oci
+              bushel convert macos-sequoia:latest trycua/macos-sequoia:latest-oci
         """
     )
 

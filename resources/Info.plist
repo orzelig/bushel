@@ -4,9 +4,9 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>com.trycua.lume</string>
+	<string>dev.orzelig.bushel</string>
 	<key>CFBundleExecutable</key>
-	<string>lume</string>
+	<string>bushel</string>
 	<key>CFBundleName</key>
 	<string>Lume</string>
 	<key>CFBundleVersion</key>

@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import lume
+@testable import bushel
 
 @Test("VNCService starts correctly")
 func testVNCServiceStart() async throws {

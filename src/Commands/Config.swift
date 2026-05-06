@@ -5,7 +5,7 @@ import Virtualization
 struct Config: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "config",
-        abstract: "Get or set lume configuration",
+        abstract: "Get or set bushel configuration",
         subcommands: [Get.self, Storage.self, Cache.self, Telemetry.self, Registry.self, Network.self],
         defaultSubcommand: Get.self
     )
@@ -326,7 +326,7 @@ struct Config: ParsableCommand {
                 } else if registry.type == .gcs {
                     print("")
                     print("GCS configuration: not set")
-                    print("  Run 'lume config registry gcs --api-url <url> --api-key <key>' to configure")
+                    print("  Run 'bushel config registry gcs --api-url <url> --api-key <key>' to configure")
                 }
             }
         }
@@ -489,7 +489,7 @@ struct Config: ParsableCommand {
                     print("  \(iface.identifier) — \(name)")
                 }
                 print("")
-                print("Usage: lume run <vm-name> --network bridged:\(interfaces.first?.identifier ?? "en0")")
+                print("Usage: bushel run <vm-name> --network bridged:\(interfaces.first?.identifier ?? "en0")")
             }
         }
     }

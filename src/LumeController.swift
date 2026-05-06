@@ -190,7 +190,7 @@ final class LumeController {
                     Logger.info("VM provisioning may be stuck", metadata: [
                         "name": vmName,
                         "operation": marker.operation,
-                        "hint": "If creation was interrupted, delete with: lume delete \(vmName)"
+                        "hint": "If creation was interrupted, delete with: bushel delete \(vmName)"
                     ])
                 }
                 return vmDir.getDetails(
@@ -525,7 +525,7 @@ final class LumeController {
     }
 
     /// Creates a VM asynchronously, returning immediately while the VM is being provisioned.
-    /// The VM will appear with status "provisioning" in `lume ls` until creation completes.
+    /// The VM will appear with status "provisioning" in `bushel ls` until creation completes.
     /// Poll VM status to check progress.
     ///
     /// - Parameters:

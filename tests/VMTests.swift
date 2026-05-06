@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import lume
+@testable import bushel
 
 class MockProcessRunner: ProcessRunner {
     var runCalls: [(executable: String, arguments: [String])] = []

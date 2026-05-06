@@ -1,6 +1,6 @@
 import Foundation
 
-@testable import lume
+@testable import bushel
 
 @MainActor
 class MockVM: VM {

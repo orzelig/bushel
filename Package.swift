@@ -4,7 +4,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "lume",
+    name: "bushel",
     platforms: [
         .macOS(.v14)
     ],
@@ -24,7 +24,7 @@ let package = Package(
             path: "Sources/CZlib"
         ),
         .executableTarget(
-            name: "lume",
+            name: "bushel",
             dependencies: [
                 "CZlib",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
@@ -43,9 +43,9 @@ let package = Package(
                 .copy("Resources/unattended-presets")
             ]),
         .testTarget(
-            name: "lumeTests",
+            name: "bushelTests",
             dependencies: [
-                "lume"
+                "bushel"
             ],
             path: "tests")
     ]

@@ -3,7 +3,7 @@ import Network
 
 enum NetworkUtils {
     /// Runs a process with a timeout, killing it if it exceeds the deadline.
-    /// Prevents `lume ls` and other commands from hanging when subprocesses
+    /// Prevents `bushel ls` and other commands from hanging when subprocesses
     /// (lsof, nc, ping) get stuck during concurrent VM state transitions.
     /// - Parameters:
     ///   - process: The configured Process to run

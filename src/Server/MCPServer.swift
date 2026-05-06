@@ -14,7 +14,7 @@ final class LumeMCPServer {
 
     func start() async throws {
         mcpServer = MCP.Server(
-            name: "lume",
+            name: "bushel",
             version: "1.0.0",
             capabilities: .init(
                 prompts: .init(listChanged: false),

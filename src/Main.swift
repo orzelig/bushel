@@ -5,7 +5,7 @@ import Foundation
 struct Lume: AsyncParsableCommand {
     static var configuration: CommandConfiguration {
         CommandConfiguration(
-            commandName: "lume",
+            commandName: "bushel",
             abstract: "A lightweight CLI and local API server to build, run and manage macOS VMs.",
             version: Version.current,
             subcommands: CommandRegistry.allCommands,
@@ -28,7 +28,7 @@ extension Lume {
      ⠀⠀⢀⣴⣿⡿⠋⣉⠁⣠⣾⣿⣿⣿⣿⡿⠿⣦⡈⠀⣿⡇⠃⠀
      ⠀⠀⠀⣽⣿⣧⠀⠃⢰⣿⣿⡏⠙⣿⠿⢧⣀⣼⣷⠀⡿⠃⠀⠀
      ⠀⠀⠀⠉⣿⣿⣦⠀⢿⣿⣿⣷⣾⡏⠀⠀⢹⣿⣿⠀⠀⠀⠀⠀⠀
-     ⠀⠀⠀⠀⠀⠉⠛⠁⠈⠿⣿⣿⣿⣷⣄⣠⡼⠟⠁\u{001B}[0m\u{001B}[1m  lume v\(Version.current)\u{001B}[0m
+     ⠀⠀⠀⠀⠀⠉⠛⠁⠈⠿⣿⣿⣿⣷⣄⣠⡼⠟⠁\u{001B}[0m\u{001B}[1m  bushel v\(Version.current)\u{001B}[0m
     \u{001B}[34m           macOS VM CLI and server\u{001B}[0m
     """
 
@@ -46,7 +46,7 @@ extension Lume {
         if args.contains("--help") || args.contains("-h") {
             return true
         }
-        // Check if first arg is "help" (e.g., "lume help")
+        // Check if first arg is "help" (e.g., "bushel help")
         if args.first == "help" && args.count == 1 {
             return true
         }
