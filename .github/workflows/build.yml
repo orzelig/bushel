@@ -1,0 +1,48 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel any in-flight run for the same ref when a new push lands.
+# PRs are keyed by github.ref (refs/pull/<n>/merge) so each PR is independent;
+# pushes to main cancel earlier main runs but never cancel a PR run.
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # macos-15 is the most current pinned runner image. Pinning (vs. macos-latest)
+    # keeps Xcode/Swift toolchain stable across runs so cache keys stay meaningful.
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain versions
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Cache .build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          # Hash Package.resolved so a dependency bump invalidates the cache.
+          # runner.os covers the macOS-version-tied SDK; if that changes we want a fresh build.
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Test
+        run: swift test
