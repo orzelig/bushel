@@ -39,9 +39,15 @@ let package = Package(
                 .product(name: "NIOSSH", package: "swift-nio-ssh")
             ],
             path: "src",
+            exclude: ["Bar"],
             resources: [
                 .copy("Resources/unattended-presets")
             ]),
+        .executableTarget(
+            name: "bushel-bar",
+            dependencies: [],
+            path: "src/Bar"
+        ),
         .testTarget(
             name: "bushelTests",
             dependencies: [

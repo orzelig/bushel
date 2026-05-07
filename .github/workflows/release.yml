@@ -31,8 +31,14 @@ jobs:
           BUILD_DIR=.build/arm64-apple-macosx/release
           STAGE=stage
           mkdir -p "$STAGE"
-          # Binary
+          # Main bushel binary
           cp "$BUILD_DIR/bushel" "$STAGE/"
+          # Optional menu bar binary (built from the bushel-bar target)
+          if [ -f "$BUILD_DIR/bushel-bar" ]; then
+            cp "$BUILD_DIR/bushel-bar" "$STAGE/"
+          else
+            echo "::warning::bushel-bar missing from build output (skipped)"
+          fi
           # SPM-generated resource bundle. Must ship adjacent to the binary —
           # Bundle.module resolves resources relative to the executable's
           # location, and our unattended-install presets live inside it.

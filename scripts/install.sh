@@ -42,11 +42,15 @@ DAEMON_ERR_LOG="/tmp/bushel_daemon.error.log"
 BUSHEL_PORT="${BUSHEL_PORT:-7777}"
 ENABLE_AUTO_UPDATE_CHECK=true   # daily check + macOS notification (no auto-apply)
 INSTALL_BACKGROUND_SERVICE=true
+INSTALL_MENUBAR=false           # bushel-bar menu-bar app — opt-in
 VERSION_TAG=""  # empty = latest
 UPDATER_LABEL="io.github.orzelig.bushel.updater"
 UPDATER_PLIST_PATH="$HOME/Library/LaunchAgents/${UPDATER_LABEL}.plist"
 UPDATER_LOG="/tmp/bushel_updater.log"
 UPDATER_ERR_LOG="/tmp/bushel_updater.error.log"
+MENUBAR_BIN_NAME="bushel-bar"
+MENUBAR_LABEL="io.github.orzelig.bushel.menubar"
+MENUBAR_PLIST_PATH="$HOME/Library/LaunchAgents/${MENUBAR_LABEL}.plist"
 
 usage() {
   cat <<USAGE
@@ -59,6 +63,8 @@ Usage: $0 [OPTIONS]
   --no-auto-update-check    Skip the daily 'bushel update --check-only --notify'
                             LaunchAgent (still installs the 'bushel update' subcommand).
   --no-background-service   Skip the daemon LaunchAgent setup entirely
+  --menubar                 Install the bushel-bar menu-bar app and register
+                            its LaunchAgent (autostart at login).
   --help                    This message
 
 Env vars: INSTALL_DIR, BUSHEL_PORT (same as flags above).
@@ -76,6 +82,7 @@ while [ "$#" -gt 0 ]; do
     --version=*) VERSION_TAG="${1#*=}" ;;
     --no-auto-update-check) ENABLE_AUTO_UPDATE_CHECK=false ;;
     --no-background-service) INSTALL_BACKGROUND_SERVICE=false ;;
+    --menubar) INSTALL_MENUBAR=true ;;
     --help|-h) usage; exit 0 ;;
     *) echo "${RED}Unknown option: $1${NORMAL}"; usage; exit 1 ;;
   esac
@@ -355,6 +362,66 @@ PLIST_EOF
   fi
 }
 
+install_menubar_app() {
+  if [ "$INSTALL_MENUBAR" != true ]; then
+    return 0
+  fi
+
+  # Find the menubar binary in the extracted tarball.
+  local found
+  found=$(find "$TEMP_DIR" -type f -name "$MENUBAR_BIN_NAME" -perm -u+x 2>/dev/null | head -n1)
+  [ -n "$found" ] || found=$(find "$TEMP_DIR" -type f -name "$MENUBAR_BIN_NAME" 2>/dev/null | head -n1)
+  if [ -z "$found" ]; then
+    warn "--menubar passed but $MENUBAR_BIN_NAME not present in the tarball; skipping."
+    return 0
+  fi
+
+  install -m 0755 "$found" "$INSTALL_DIR/$MENUBAR_BIN_NAME"
+  ok "Installed menubar binary: ${BOLD}$INSTALL_DIR/$MENUBAR_BIN_NAME${NORMAL}"
+
+  # Idempotent unload before write.
+  [ -f "$MENUBAR_PLIST_PATH" ] && launchctl unload "$MENUBAR_PLIST_PATH" 2>/dev/null || true
+
+  local tmpl
+  tmpl=$(cat <<'PLIST_EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.github.orzelig.bushel.menubar</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__MENUBAR_BIN__</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/bushel_menubar.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/bushel_menubar.error.log</string>
+</dict>
+</plist>
+PLIST_EOF
+)
+  printf '%s\n' "$tmpl" \
+    | sed "s|__MENUBAR_BIN__|$INSTALL_DIR/$MENUBAR_BIN_NAME|g" \
+    > "$MENUBAR_PLIST_PATH"
+  chmod 644 "$MENUBAR_PLIST_PATH"
+  plutil -lint "$MENUBAR_PLIST_PATH" >/dev/null || fail "Generated menubar plist is invalid: $MENUBAR_PLIST_PATH"
+
+  if launchctl load "$MENUBAR_PLIST_PATH" 2>/dev/null; then
+    ok "Menubar app installed: ${BOLD}$MENUBAR_LABEL${NORMAL} (autostart at login)."
+    info "  Look for the 🌾 in your menu bar. Quit it via the menu's 'Quit bushel-bar'."
+  else
+    warn "Failed to load menubar LaunchAgent. Run 'launchctl load $MENUBAR_PLIST_PATH' manually."
+  fi
+}
+
 print_summary() {
   echo ""
   ok "${BOLD}Bushel installed.${NORMAL}"
@@ -402,6 +469,7 @@ main() {
   install_artifacts
   install_launch_agent
   install_update_check_agent
+  install_menubar_app
   print_summary
 }
 

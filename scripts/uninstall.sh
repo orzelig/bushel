@@ -52,6 +52,8 @@ DAEMON_LOG="/tmp/bushel_daemon.log"
 DAEMON_ERR_LOG="/tmp/bushel_daemon.error.log"
 UPDATER_LOG="/tmp/bushel_updater.log"
 UPDATER_ERR_LOG="/tmp/bushel_updater.error.log"
+MENUBAR_LOG="/tmp/bushel_menubar.log"
+MENUBAR_ERR_LOG="/tmp/bushel_menubar.error.log"
 RESOURCE_DIR="$HOME/.local/share/bushel"
 
 PURGE=false
@@ -155,6 +157,24 @@ if [ -f "$UPDATER_PLIST" ]; then
 fi
 launchctl remove "$UPDATER_LABEL" 2>/dev/null || true
 
+# Remove the menubar LaunchAgent + binary if installed.
+MENUBAR_LABEL="io.github.orzelig.bushel.menubar"
+MENUBAR_PLIST="$HOME/Library/LaunchAgents/${MENUBAR_LABEL}.plist"
+if [ -f "$MENUBAR_PLIST" ]; then
+  launchctl unload "$MENUBAR_PLIST" 2>/dev/null || true
+  rm -f "$MENUBAR_PLIST"
+  ok "Removed menubar LaunchAgent: $MENUBAR_PLIST"
+  REMOVED+=("$MENUBAR_PLIST")
+fi
+launchctl remove "$MENUBAR_LABEL" 2>/dev/null || true
+for menubar_bin in "$HOME/.local/bin/bushel-bar" "/usr/local/bin/bushel-bar" "/opt/homebrew/bin/bushel-bar"; do
+  if [ -f "$menubar_bin" ]; then
+    rm -f "$menubar_bin"
+    ok "Removed menubar binary: $menubar_bin"
+    REMOVED+=("$menubar_bin")
+  fi
+done
+
 # ============================================================================
 # Phase 3: remove binary
 # ============================================================================
@@ -193,7 +213,7 @@ fi
 # Phase 4: remove log files
 # ============================================================================
 info "Removing log files..."
-for logfile in "$DAEMON_LOG" "$DAEMON_ERR_LOG" "$UPDATER_LOG" "$UPDATER_ERR_LOG"; do
+for logfile in "$DAEMON_LOG" "$DAEMON_ERR_LOG" "$UPDATER_LOG" "$UPDATER_ERR_LOG" "$MENUBAR_LOG" "$MENUBAR_ERR_LOG"; do
   if [ -f "$logfile" ]; then
     rm -f "$logfile"
     ok "Removed: $logfile"
