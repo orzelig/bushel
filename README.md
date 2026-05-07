@@ -28,6 +28,22 @@ swift build -c release
 .build/arm64-apple-macosx/release/bushel --help
 ```
 
+## Use with Claude
+
+After installing:
+
+```bash
+bushel claude-setup
+```
+
+This detects Claude Desktop and Claude Code on your machine, registers bushel as an MCP server in each, and tells you to restart the client. Then tell Claude:
+
+> Start using bushel.
+
+That's it. Claude can now drive bushel's 10 MCP tools (list/get/start/stop/clone/delete/exec/create VMs, plus pull-image and host-status).
+
+`claude-setup` is idempotent — re-running it is a safe no-op when the config is already correct. Use `--dry-run` to see what it would change, or `--print-only` to get the Claude Desktop config snippet without writing files.
+
 ## Compatibility with lume
 
 Bushel renames only the binary. Everything else is wire-compatible with lume:

@@ -315,12 +315,18 @@ print_summary() {
 
   path_advice
 
-  echo ""
+  local bushel_cmd="$INSTALL_DIR/$BINARY_NAME"
   if echo ":$PATH:" | grep -q ":$INSTALL_DIR:"; then
-    echo "Next: ${BOLD}$BINARY_NAME --help${NORMAL}"
-  else
-    echo "Next: ${BOLD}$INSTALL_DIR/$BINARY_NAME --help${NORMAL}"
+    bushel_cmd="$BINARY_NAME"
   fi
+
+  echo ""
+  echo "${BOLD}Use with Claude:${NORMAL}"
+  echo "  1. ${bushel_cmd} claude-setup"
+  echo "  2. Restart Claude (Desktop and/or Code)"
+  echo "  3. Tell Claude: ${BOLD}\"Start using bushel.\"${NORMAL}"
+  echo ""
+  echo "Or just run ${BOLD}${bushel_cmd} --help${NORMAL}."
 }
 
 main() {
