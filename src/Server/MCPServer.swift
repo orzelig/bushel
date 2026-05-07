@@ -605,16 +605,17 @@ final class LumeMCPServer {
             case "lume_wait_for_vm":
                 return try await handleWaitForVM(params.arguments)
             default:
-                return CallTool.Result(
-                    content: [.text("Unknown tool: \(params.name)")],
-                    isError: true
+                return MCPResponse.error(
+                    operation: "unknown",
+                    code: "unknown_tool",
+                    message: "Unknown tool: \(params.name)"
                 )
             }
         } catch {
-            return CallTool.Result(
-                content: [.text("Error: \(error.localizedDescription)")],
-                isError: true
-            )
+            // Strip the "lume_" prefix so the operation name in the response is
+            // just "list_vms", "start_vm", etc.
+            let op = params.name.hasPrefix("lume_") ? String(params.name.dropFirst(5)) : params.name
+            return MCPResponse.error(operation: op, throwing: error)
         }
     }
 
@@ -623,29 +624,29 @@ final class LumeMCPServer {
     private func handleListVMs(_ args: [String: Value]?) async throws -> CallTool.Result {
         let storage = args?["storage"]?.stringValue
         let vms = try controller.list(storage: storage)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let json = try encoder.encode(vms)
-        return CallTool.Result(content: [.text(String(data: json, encoding: .utf8) ?? "[]")])
+        // Re-serialize via Codable then parse back to [Any] so the envelope's
+        // JSONSerialization-based payload can include the structured VM list.
+        let encoded = try JSONEncoder().encode(vms)
+        let asArray = (try JSONSerialization.jsonObject(with: encoded) as? [Any]) ?? []
+        return MCPResponse.success(operation: "list_vms", resultArray: asArray)
     }
 
     private func handleGetVM(_ args: [String: Value]?) async throws -> CallTool.Result {
         guard let name = args?["name"]?.stringValue else {
-            return CallTool.Result(content: [.text("Error: 'name' is required")], isError: true)
+            return MCPResponse.error(operation: "get_vm", code: "validation_error", message: "'name' is required")
         }
         let storage = args?["storage"]?.stringValue
 
-        // Use getDetails() for consistent status including provisioning state
+        // getDetails() returns a status that reflects provisioning state too (not just running/stopped).
         let vmDetails = try controller.getDetails(name: name, storage: storage)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let json = try encoder.encode(vmDetails)
-        return CallTool.Result(content: [.text(String(data: json, encoding: .utf8) ?? "{}")])
+        let encoded = try JSONEncoder().encode(vmDetails)
+        let asDict = (try JSONSerialization.jsonObject(with: encoded) as? [String: Any]) ?? [:]
+        return MCPResponse.success(operation: "get_vm", result: asDict)
     }
 
     private func handleRunVM(_ args: [String: Value]?) async throws -> CallTool.Result {
         guard let name = args?["name"]?.stringValue else {
-            return CallTool.Result(content: [.text("Error: 'name' is required")], isError: true)
+            return MCPResponse.error(operation: "start_vm", code: "validation_error", message: "'name' is required")
         }
 
         let storage = args?["storage"]?.stringValue
@@ -654,12 +655,13 @@ final class LumeMCPServer {
 
         var sharedDirectories: [SharedDirectory] = []
         if let sharedDir = args?["shared_dir"]?.stringValue {
-            // Expand ~ to home directory
             let expandedPath = (sharedDir as NSString).expandingTildeInPath
             sharedDirectories.append(SharedDirectory(hostPath: expandedPath, tag: "shared", readOnly: false))
         }
 
-        // Run VM in detached task to avoid blocking (same pattern as HTTP API)
+        // Run VM in detached task to avoid blocking (same pattern as HTTP API).
+        // Errors here surface to logs only; the agent should call lume_wait_for_vm
+        // with condition='ssh_ready' to get a typed signal of actual readiness.
         Task.detached { @MainActor @Sendable in
             do {
                 let vmController = LumeController()
@@ -673,127 +675,154 @@ final class LumeMCPServer {
             } catch {
                 Logger.error(
                     "Failed to start VM in background task",
-                    metadata: [
-                        "name": name,
-                        "error": error.localizedDescription,
-                    ])
+                    metadata: ["name": name, "error": error.localizedDescription])
             }
         }
 
-        // Wait briefly for VM to initialize and get IP
-        try await Task.sleep(nanoseconds: 2_000_000_000)  // 2 seconds
+        // Brief settle so the IP is usually populated by the time we return. The
+        // agent's contract is "this kicks off start; use wait_for_vm for readiness."
+        try await Task.sleep(nanoseconds: 2_000_000_000)
 
-        // Get VM details after starting to return IP
         let vmDetails = try controller.getDetails(name: name, storage: storage)
-        var response = "VM '\(name)' started successfully."
+        var result: [String: Any] = [
+            "name": name,
+            "status": vmDetails.status,
+            "shared_dir_mounted": !sharedDirectories.isEmpty,
+        ]
         if let ip = vmDetails.ipAddress {
-            response += "\nIP Address: \(ip)"
-            response += "\nSSH: ssh lume@\(ip) (password: lume)"
+            result["ip"] = ip
+            result["ssh"] = "ssh lume@\(ip)"
         }
-        if !sharedDirectories.isEmpty {
-            response += "\nShared directory available at: /Volumes/My Shared Files"
-        }
-
-        return CallTool.Result(content: [.text(response)])
+        return MCPResponse.success(
+            operation: "start_vm",
+            result: result,
+            message: "VM '\(name)' starting. Use lume_wait_for_vm to wait for ssh_ready."
+        )
     }
 
     private func handleStopVM(_ args: [String: Value]?) async throws -> CallTool.Result {
         guard let name = args?["name"]?.stringValue else {
-            return CallTool.Result(content: [.text("Error: 'name' is required")], isError: true)
+            return MCPResponse.error(operation: "stop_vm", code: "validation_error", message: "'name' is required")
         }
         let storage = args?["storage"]?.stringValue
 
         try await controller.stopVM(name: name, storage: storage)
-        return CallTool.Result(content: [.text("VM '\(name)' stopped successfully.")])
+        return MCPResponse.success(
+            operation: "stop_vm",
+            result: ["name": name],
+            message: "VM '\(name)' stopped."
+        )
     }
 
     private func handleCloneVM(_ args: [String: Value]?) async throws -> CallTool.Result {
         guard let name = args?["name"]?.stringValue else {
-            return CallTool.Result(content: [.text("Error: 'name' is required")], isError: true)
+            return MCPResponse.error(operation: "clone_vm", code: "validation_error", message: "'name' is required")
         }
         guard let newName = args?["new_name"]?.stringValue else {
-            return CallTool.Result(content: [.text("Error: 'new_name' is required")], isError: true)
+            return MCPResponse.error(operation: "clone_vm", code: "validation_error", message: "'new_name' is required")
         }
 
         try controller.clone(name: name, newName: newName)
-        return CallTool.Result(content: [.text("VM '\(name)' cloned to '\(newName)' successfully.")])
+        return MCPResponse.success(
+            operation: "clone_vm",
+            result: ["source": name, "name": newName],
+            message: "VM '\(name)' cloned to '\(newName)'."
+        )
     }
 
     private func handleDeleteVM(_ args: [String: Value]?) async throws -> CallTool.Result {
         guard let name = args?["name"]?.stringValue else {
-            return CallTool.Result(content: [.text("Error: 'name' is required")], isError: true)
+            return MCPResponse.error(operation: "delete_vm", code: "validation_error", message: "'name' is required")
         }
         let storage = args?["storage"]?.stringValue
 
         try await controller.delete(name: name, storage: storage)
-        return CallTool.Result(content: [.text("VM '\(name)' deleted successfully.")])
+        return MCPResponse.success(
+            operation: "delete_vm",
+            result: ["name": name],
+            message: "VM '\(name)' deleted."
+        )
     }
 
     private func handleExec(_ args: [String: Value]?) async throws -> CallTool.Result {
         guard let name = args?["name"]?.stringValue else {
-            return CallTool.Result(content: [.text("Error: 'name' is required")], isError: true)
+            return MCPResponse.error(operation: "exec", code: "validation_error", message: "'name' is required")
         }
         guard let command = args?["command"]?.stringValue else {
-            return CallTool.Result(content: [.text("Error: 'command' is required")], isError: true)
+            return MCPResponse.error(operation: "exec", code: "validation_error", message: "'command' is required")
         }
 
         let user = args?["user"]?.stringValue ?? "lume"
         let password = args?["password"]?.stringValue ?? "lume"
         let storage = args?["storage"]?.stringValue
 
-        // Get VM to find IP address
         let vm = try controller.get(name: name, storage: storage)
         guard let ip = vm.details.ipAddress else {
-            return CallTool.Result(
-                content: [.text("Error: VM '\(name)' has no IP address. Is it running?")],
-                isError: true
+            return MCPResponse.error(
+                operation: "exec",
+                code: "vm_not_running",
+                message: "VM '\(name)' has no IP address. Is it running?"
             )
         }
 
-        // Check if SSH is available
         if vm.details.sshAvailable == false {
-            return CallTool.Result(
-                content: [.text("Error: SSH is not available on VM '\(name)'. Make sure SSH is enabled in the VM.")],
-                isError: true
+            return MCPResponse.error(
+                operation: "exec",
+                code: "ssh_unavailable",
+                message: "SSH is not available on VM '\(name)'. Wait for ssh_ready or ensure SSH is enabled in the VM."
             )
         }
 
-        // Execute command via native SSH client (no sshpass dependency)
-        let sshClient = SSHClient(
-            host: ip,
-            port: 22,
-            user: user,
-            password: password
-        )
+        let sshClient = SSHClient(host: ip, port: 22, user: user, password: password)
 
         do {
+            // SSHClient.execute merges stdout and stderr into a single output string;
+            // splitting them is tracked separately. Exit code is exposed here so the
+            // agent can branch on it without parsing free text.
             let sshResult = try await sshClient.execute(command: command, timeout: 60)
-
-            var result = sshResult.output
-            if result.isEmpty {
-                result = sshResult.exitCode == 0
-                    ? "Command completed successfully (no output)"
-                    : "Command failed with exit code \(sshResult.exitCode)"
+            let payload: [String: Any] = [
+                "exit_code": sshResult.exitCode,
+                "output": sshResult.output,
+            ]
+            if sshResult.exitCode == 0 {
+                return MCPResponse.success(
+                    operation: "exec",
+                    result: payload,
+                    message: "Command completed (exit 0)."
+                )
+            } else {
+                // Non-zero exit is a real signal the agent should usually act on, so
+                // return as error with a typed code, but include exit_code + output
+                // in the message so the agent can still see what happened.
+                let body: [String: Any] = [
+                    "ok": false,
+                    "operation": "exec",
+                    "error": ["code": "command_failed", "message": "Command exited with code \(sshResult.exitCode)"],
+                    "result": payload,
+                ]
+                let data = (try? JSONSerialization.data(
+                    withJSONObject: body, options: [.prettyPrinted, .sortedKeys])) ?? Data()
+                return CallTool.Result(
+                    content: [.text(String(data: data, encoding: .utf8) ?? "{}")],
+                    isError: true
+                )
             }
-
-            return CallTool.Result(content: [.text(result)], isError: sshResult.exitCode != 0)
-        } catch let error as SSHError {
-            return CallTool.Result(content: [.text("Error: \(error.localizedDescription)")], isError: true)
         } catch {
-            return CallTool.Result(content: [.text("Error: \(error.localizedDescription)")], isError: true)
+            return MCPResponse.error(operation: "exec", throwing: error)
         }
     }
 
     private func handleCreateVM(_ args: [String: Value]?) async throws -> CallTool.Result {
         guard let name = args?["name"]?.stringValue else {
-            return CallTool.Result(content: [.text("Error: 'name' is required")], isError: true)
+            return MCPResponse.error(operation: "create_vm", code: "validation_error", message: "'name' is required")
         }
 
         let osValue = (args?["os"]?.stringValue ?? "macos").lowercased()
         guard ["macos", "linux"].contains(osValue) else {
-            return CallTool.Result(
-                content: [.text("Error: 'os' must be 'macos' or 'linux', got '\(osValue)'")],
-                isError: true
+            return MCPResponse.error(
+                operation: "create_vm",
+                code: "validation_error",
+                message: "'os' must be 'macos' or 'linux', got '\(osValue)'"
             )
         }
 
@@ -843,28 +872,38 @@ final class LumeMCPServer {
             unattendedConfig: unattendedConfig
         )
 
-        var response = "VM '\(name)' creation started (os: \(osValue)). Status: provisioning."
-        response += "\nUse lume_wait_for_vm or poll lume_get_vm to track progress."
+        var result: [String: Any] = [
+            "name": name,
+            "os": osValue,
+            "status": "provisioning",
+            "cpu": cpuCount,
+            "memory_bytes": memorySize,
+            "disk_bytes": diskSize,
+        ]
+        if let ipsw = ipsw { result["ipsw"] = ipsw }
+        result["unattended"] = unattendedConfig != nil
+        var msg = "VM '\(name)' creation started (\(osValue)). Use lume_wait_for_vm to track."
         if unattendedConfig != nil {
-            response += "\nUnattended setup will run automatically after IPSW installation."
+            msg += " Unattended setup will run automatically after IPSW installation."
         }
-
-        return CallTool.Result(content: [.text(response)])
+        return MCPResponse.success(operation: "create_vm", result: result, message: msg)
     }
 
     private func handlePullImage(_ args: [String: Value]?) async throws -> CallTool.Result {
         guard let image = args?["image"]?.stringValue else {
-            return CallTool.Result(
-                content: [.text("Error: 'image' is required (e.g. 'macos-sequoia-vanilla:latest')")],
-                isError: true
+            return MCPResponse.error(
+                operation: "pull_image",
+                code: "validation_error",
+                message: "'image' is required (e.g. 'macos-sequoia-vanilla:latest')"
             )
         }
 
         let parts = image.split(separator: ":")
         guard parts.count == 2 else {
-            return CallTool.Result(
-                content: [.text("Error: image must be in 'name:tag' format, got '\(image)'")],
-                isError: true
+            return MCPResponse.error(
+                operation: "pull_image",
+                code: "validation_error",
+                message: "Image must be in 'name:tag' format, got '\(image)'"
             )
         }
 
@@ -901,10 +940,17 @@ final class LumeMCPServer {
             }
         }
 
-        var response = "Pull started for image '\(image)' to VM '\(vmName)'."
-        response += "\nThis runs in the background. Linux pulls finish in 1–5 minutes; macOS pulls take 5–30 minutes."
-        response += "\nUse lume_get_vm with name '\(vmName)' or lume_list_vms to check when the VM appears."
-        return CallTool.Result(content: [.text(response)])
+        return MCPResponse.success(
+            operation: "pull_image",
+            result: [
+                "image": image,
+                "name": vmName,
+                "registry": registry,
+                "organization": organization,
+                "status": "pulling",
+            ],
+            message: "Pull started for '\(image)' to VM '\(vmName)'. Linux: 1–5 min, macOS: 5–30 min. Use lume_get_vm or lume_wait_for_vm to track."
+        )
     }
 
     private func handleHostStatus(_ args: [String: Value]?) async throws -> CallTool.Result {
@@ -915,21 +961,21 @@ final class LumeMCPServer {
         let maxVMs = 2  // Apple Virtualization.framework limit on concurrent VMs
         let availableSlots = max(0, maxVMs - runningCount)
 
-        let payload: [String: Any] = [
-            "status": "healthy",
-            "vm_count": runningCount,
-            "max_vms": maxVMs,
-            "available_slots": availableSlots,
-            "version": Lume.Version.current,
-        ]
-        let json = try JSONSerialization.data(
-            withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-        return CallTool.Result(content: [.text(String(data: json, encoding: .utf8) ?? "{}")])
+        return MCPResponse.success(
+            operation: "host_status",
+            result: [
+                "status": "healthy",
+                "vm_count": runningCount,
+                "max_vms": maxVMs,
+                "available_slots": availableSlots,
+                "version": Lume.Version.current,
+            ]
+        )
     }
 
     private func handleWaitForVM(_ args: [String: Value]?) async throws -> CallTool.Result {
         guard let name = args?["name"]?.stringValue else {
-            return CallTool.Result(content: [.text("Error: 'name' is required")], isError: true)
+            return MCPResponse.error(operation: "wait_for_vm", code: "validation_error", message: "'name' is required")
         }
         let condition = (args?["condition"]?.stringValue ?? "ssh_ready").lowercased()
         let timeoutSec = args?["timeout_seconds"]?.intValue ?? 300
@@ -937,9 +983,10 @@ final class LumeMCPServer {
 
         let validConditions = ["running", "stopped", "ssh_ready", "provisioning_complete"]
         guard validConditions.contains(condition) else {
-            return CallTool.Result(
-                content: [.text("Error: 'condition' must be one of \(validConditions.joined(separator: ", ")), got '\(condition)'")],
-                isError: true
+            return MCPResponse.error(
+                operation: "wait_for_vm",
+                code: "validation_error",
+                message: "'condition' must be one of \(validConditions.joined(separator: ", ")), got '\(condition)'"
             )
         }
 
@@ -956,10 +1003,19 @@ final class LumeMCPServer {
                 lastStatus = vm.status
                 if conditionMet(condition, vm: vm) {
                     let elapsed = Int(Date().timeIntervalSince(start))
-                    let ip = vm.ipAddress ?? "—"
-                    let ssh = (vm.sshAvailable ?? false) ? "yes" : "no"
-                    let response = "VM '\(name)' reached '\(condition)' after \(elapsed)s. status=\(vm.status) ip=\(ip) ssh=\(ssh)"
-                    return CallTool.Result(content: [.text(response)])
+                    var result: [String: Any] = [
+                        "name": name,
+                        "condition": condition,
+                        "status": vm.status,
+                        "ssh_available": vm.sshAvailable ?? false,
+                        "elapsed_seconds": elapsed,
+                    ]
+                    if let ip = vm.ipAddress { result["ip"] = ip }
+                    return MCPResponse.success(
+                        operation: "wait_for_vm",
+                        result: result,
+                        message: "VM '\(name)' reached '\(condition)' after \(elapsed)s."
+                    )
                 }
             } catch {
                 // VM not yet visible (very early in provisioning) — keep polling until
@@ -969,9 +1025,10 @@ final class LumeMCPServer {
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
 
-        return CallTool.Result(
-            content: [.text("Timeout: VM '\(name)' did not reach '\(condition)' within \(timeoutSec)s. Last observed status: \(lastStatus).")],
-            isError: true
+        return MCPResponse.error(
+            operation: "wait_for_vm",
+            code: "wait_timeout",
+            message: "VM '\(name)' did not reach '\(condition)' within \(timeoutSec)s. Last observed status: \(lastStatus)."
         )
     }
 
