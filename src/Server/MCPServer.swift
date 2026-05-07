@@ -494,6 +494,44 @@ final class LumeMCPServer {
                     ]),
                     "required": .array([.string("name")])
                 ])
+            ),
+            Tool(
+                name: "lume_pull_image",
+                description: "Pull a pre-built VM image from a container registry (e.g. ghcr.io/trycua/macos-sequoia-vanilla:latest, ubuntu-noble-vanilla:latest) into local storage. Async — returns immediately while the download proceeds in the background. Large macOS images can take 5–30 minutes; use lume_list_vms or lume_get_vm with the resolved VM name to detect when the VM appears in the local list. Linux pulls are typically 1–5 minutes.",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "image": .object([
+                            "type": .string("string"),
+                            "description": .string("Image reference in 'name:tag' format, e.g. 'macos-sequoia-vanilla:latest'")
+                        ]),
+                        "name": .object([
+                            "type": .string("string"),
+                            "description": .string("Local VM name to assign (default: derived from image name)")
+                        ]),
+                        "registry": .object([
+                            "type": .string("string"),
+                            "description": .string("Registry host (default: ghcr.io)")
+                        ]),
+                        "organization": .object([
+                            "type": .string("string"),
+                            "description": .string("Registry organization (default: trycua)")
+                        ]),
+                        "storage": .object([
+                            "type": .string("string"),
+                            "description": .string("Optional storage location name or path")
+                        ])
+                    ]),
+                    "required": .array([.string("image")])
+                ])
+            ),
+            Tool(
+                name: "lume_host_status",
+                description: "Report host capacity: how many VMs are currently running, the maximum allowed by Apple Virtualization.framework (2 on macOS), and how many slots remain. Use this before starting or creating a new VM to avoid hitting the concurrency cap.",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([:])
+                ])
             )
         ]
     }
@@ -519,6 +557,10 @@ final class LumeMCPServer {
                 return try await handleExec(params.arguments)
             case "lume_create_vm":
                 return try await handleCreateVM(params.arguments)
+            case "lume_pull_image":
+                return try await handlePullImage(params.arguments)
+            case "lume_host_status":
+                return try await handleHostStatus(params.arguments)
             default:
                 return CallTool.Result(
                     content: [.text("Unknown tool: \(params.name)")],
@@ -751,6 +793,81 @@ final class LumeMCPServer {
         }
 
         return CallTool.Result(content: [.text(response)])
+    }
+
+    private func handlePullImage(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let image = args?["image"]?.stringValue else {
+            return CallTool.Result(
+                content: [.text("Error: 'image' is required (e.g. 'macos-sequoia-vanilla:latest')")],
+                isError: true
+            )
+        }
+
+        let parts = image.split(separator: ":")
+        guard parts.count == 2 else {
+            return CallTool.Result(
+                content: [.text("Error: image must be in 'name:tag' format, got '\(image)'")],
+                isError: true
+            )
+        }
+
+        let name = args?["name"]?.stringValue
+        let registry = args?["registry"]?.stringValue ?? "ghcr.io"
+        let organization = args?["organization"]?.stringValue ?? "trycua"
+        let storage = args?["storage"]?.stringValue
+        let vmName = name ?? String(parts[0])
+
+        // Mirrors the async-detached pattern in Handlers.handlePullStart so progress
+        // is tracked the same way for HTTP and MCP callers. PR-followup will surface
+        // PullProgressTracker.shared as a queryable MCP resource.
+        await PullProgressTracker.shared.setProgress(0.0, for: vmName)
+        Task.detached { @MainActor @Sendable in
+            do {
+                let vmController = LumeController()
+                try await vmController.pullImage(
+                    image: image,
+                    name: name,
+                    registry: registry,
+                    organization: organization,
+                    storage: storage,
+                    progressHandler: { pct in
+                        Task { await PullProgressTracker.shared.setProgress(pct, for: vmName) }
+                    }
+                )
+                await PullProgressTracker.shared.complete(for: vmName)
+                Logger.info("MCP pull completed", metadata: ["name": vmName])
+            } catch {
+                await PullProgressTracker.shared.setError(error.localizedDescription, for: vmName)
+                Logger.error(
+                    "MCP pull failed",
+                    metadata: ["name": vmName, "error": error.localizedDescription])
+            }
+        }
+
+        var response = "Pull started for image '\(image)' to VM '\(vmName)'."
+        response += "\nThis runs in the background. Linux pulls finish in 1–5 minutes; macOS pulls take 5–30 minutes."
+        response += "\nUse lume_get_vm with name '\(vmName)' or lume_list_vms to check when the VM appears."
+        return CallTool.Result(content: [.text(response)])
+    }
+
+    private func handleHostStatus(_ args: [String: Value]?) async throws -> CallTool.Result {
+        _ = args  // host status takes no inputs
+
+        let vms = try controller.list(storage: nil)
+        let runningCount = vms.filter { $0.status == "running" }.count
+        let maxVMs = 2  // Apple Virtualization.framework limit on concurrent VMs
+        let availableSlots = max(0, maxVMs - runningCount)
+
+        let payload: [String: Any] = [
+            "status": "healthy",
+            "vm_count": runningCount,
+            "max_vms": maxVMs,
+            "available_slots": availableSlots,
+            "version": Lume.Version.current,
+        ]
+        let json = try JSONSerialization.data(
+            withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        return CallTool.Result(content: [.text(String(data: json, encoding: .utf8) ?? "{}")])
     }
 }
 
