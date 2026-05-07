@@ -41,11 +41,21 @@ These look worth vendoring; not yet applied. Evaluation order is rough; please o
 | [trycua/cua#941](https://github.com/trycua/cua/pull/941) | feat(lume): add `compact` and `expand` | Feature add; needs review for scope fit |
 | [trycua/cua#1082](https://github.com/trycua/cua/pull/1082) | feat(lume): add option to specify custom config file path | Feature add; small surface |
 
+## Bushel-native features not yet in upstream
+
+Capabilities that bushel ships independently of upstream lume.
+
+| Feature | Note |
+|---|---|
+| VM snapshots ([trycua/cua#15](https://github.com/trycua/cua/issues/15)) | `lume_snapshot_create / list / restore / delete` MCP tools, backed by lume's existing APFS clonefile-based clone (so disk.img is duplicated copy-on-write — disk usage grows only as the snapshot diverges). VM must be stopped during snapshot/restore — the Apple Virtualization.framework doesn't expose a quiesced live snapshot hook. |
+| `bushel update` | Self-update with SHA-256 verification against the published release sidecar. |
+| `bushel claude-setup` | One-step MCP registration in Claude Desktop and Claude Code. |
+| MCP response envelope | All MCP tool returns share a stable `{ok, operation, result, message, error.code}` shape so agents can branch on `ok` and make typed retry decisions on `error.code`. |
+
 ## Notable open upstream issues (not yet addressed)
 
 Tracking these for visibility — they're known limitations that bushel hasn't tackled yet.
 
-- [trycua/cua#15](https://github.com/trycua/cua/issues/15) — VM snapshot management
 - [trycua/cua#58](https://github.com/trycua/cua/issues/58) — Nested virtualization support
 - [trycua/cua#75](https://github.com/trycua/cua/issues/75) — NoVNC support
 - [trycua/cua#925](https://github.com/trycua/cua/issues/925) — Allow disk image resize (shrink)
