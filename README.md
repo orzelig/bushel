@@ -19,6 +19,8 @@ See [UPSTREAM-STATUS.md](UPSTREAM-STATUS.md) for the full relationship to upstre
 
 Installs the `bushel` binary to `~/.local/bin/bushel` and registers a LaunchAgent (`io.github.orzelig.bushel.daemon`) for `bushel serve` on `127.0.0.1:7777`. Apple Silicon only. No telemetry, no auto-update by default.
 
+To upgrade: `bushel update` (or `bushel update --check-only` to just see what's available). SHA-256 is verified against the published sidecar before any files are swapped, and the daemon is stopped and restarted around the swap.
+
 To uninstall: `bash <(curl -fsSL https://raw.githubusercontent.com/orzelig/bushel/main/scripts/uninstall.sh)`. User data in `~/.lume` and `~/.config/lume` is preserved unless you pass `--purge`.
 
 ### Build from source

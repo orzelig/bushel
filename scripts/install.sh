@@ -296,9 +296,11 @@ PLIST_EOF
 # ============================ Phase 5: post-install ========================
 auto_updater_note() {
   if [ "$ENABLE_AUTO_UPDATE" = true ]; then
-    warn "auto-updater not yet implemented; rerun install.sh to upgrade."
-    # TODO(bushel): real auto-updater (LaunchAgent + signed release validation)
-    # once stable release tooling is in place.
+    info "Auto-update opt-in noted. Periodic checking isn't wired up yet —"
+    info "run \`$BINARY_NAME update\` (or \`$BINARY_NAME update --check-only\`)"
+    info "to see and apply new releases. SHA-256 is verified before swap."
+    # TODO(bushel): LaunchAgent that periodically runs `bushel update --check-only`
+    # and surfaces a macOS notification when an update is available.
   fi
 }
 

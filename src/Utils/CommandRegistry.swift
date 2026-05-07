@@ -23,6 +23,7 @@ enum CommandRegistry {
             Logs.self,
             Setup.self,
             ClaudeSetup.self,
+            Update.self,
             DumpDocs.self,
         ]
     }
