@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import MCP
 
@@ -401,7 +402,7 @@ final class LumeMCPServer {
             ),
             Tool(
                 name: "lume_clone_vm",
-                description: "Clone a VM to create a copy. Useful for creating golden images for instant reset.",
+                description: "Clone a VM to create a copy. Backed by APFS clonefile() — near-instant on the same volume, copy-on-write disk usage. Useful for golden-image patterns. Source VM must be stopped.",
                 inputSchema: .object([
                     "type": .string("object"),
                     "properties": .object([
@@ -412,6 +413,14 @@ final class LumeMCPServer {
                         "new_name": .object([
                             "type": .string("string"),
                             "description": .string("Name for the cloned VM")
+                        ]),
+                        "source_storage": .object([
+                            "type": .string("string"),
+                            "description": .string("Optional storage location of the source VM")
+                        ]),
+                        "dest_storage": .object([
+                            "type": .string("string"),
+                            "description": .string("Optional storage location for the cloned VM (defaults to source_storage)")
                         ])
                     ]),
                     "required": .array([.string("name"), .string("new_name")])
@@ -639,6 +648,121 @@ final class LumeMCPServer {
                 ])
             ),
             Tool(
+                name: "lume_pull_status",
+                description: "Report progress of an in-flight lume_pull_image. Returns 0.0–1.0 progress, an error string if the pull failed, or 'not_pulling' if no pull is in progress for that name (which also covers 'pull completed and the VM is now in the regular list').",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "name": .object([
+                            "type": .string("string"),
+                            "description": .string("VM name passed to (or derived for) lume_pull_image")
+                        ])
+                    ]),
+                    "required": .array([.string("name")])
+                ])
+            ),
+            Tool(
+                name: "lume_screen_capture",
+                description: "Capture the VM's screen as a PNG (returned as an MCP image plus a JSON metadata sidecar). VM must be running with VNC available. Use this for vision-capable agents to see the macOS GUI.",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "name": .object([
+                            "type": .string("string"),
+                            "description": .string("Name of a running VM with VNC active")
+                        ]),
+                        "storage": .object([
+                            "type": .string("string"),
+                            "description": .string("Optional storage location name or path")
+                        ])
+                    ]),
+                    "required": .array([.string("name")])
+                ])
+            ),
+            Tool(
+                name: "lume_screen_click",
+                description: "Send a mouse click at (x, y) inside the VM via VNC. Coordinates are in the VM's screen pixels (use lume_screen_capture to see what's there). VM must be running with VNC available.",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "name": .object([
+                            "type": .string("string"),
+                            "description": .string("Name of a running VM with VNC active")
+                        ]),
+                        "x": .object([
+                            "type": .string("integer"),
+                            "description": .string("X coordinate in VM screen pixels")
+                        ]),
+                        "y": .object([
+                            "type": .string("integer"),
+                            "description": .string("Y coordinate in VM screen pixels")
+                        ]),
+                        "button": .object([
+                            "type": .string("string"),
+                            "enum": .array([.string("left"), .string("middle"), .string("right")]),
+                            "description": .string("Mouse button (default: left)")
+                        ]),
+                        "double": .object([
+                            "type": .string("boolean"),
+                            "description": .string("Send a double-click (default: false)")
+                        ]),
+                        "storage": .object([
+                            "type": .string("string"),
+                            "description": .string("Optional storage location name or path")
+                        ])
+                    ]),
+                    "required": .array([.string("name"), .string("x"), .string("y")])
+                ])
+            ),
+            Tool(
+                name: "lume_screen_type",
+                description: "Type text into the VM via VNC keyboard events (one keysym per character, with Shift held for capital letters and shifted symbols). Slow for long strings — for >50 chars prefer lume_screen_paste.",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "name": .object([
+                            "type": .string("string"),
+                            "description": .string("Name of a running VM with VNC active")
+                        ]),
+                        "text": .object([
+                            "type": .string("string"),
+                            "description": .string("Text to type. Newlines are sent as Return key presses.")
+                        ]),
+                        "delay_ms": .object([
+                            "type": .string("integer"),
+                            "description": .string("Delay between key presses in milliseconds (default: 50). Reduce for headless workflows; increase if the guest UI is dropping events.")
+                        ]),
+                        "storage": .object([
+                            "type": .string("string"),
+                            "description": .string("Optional storage location name or path")
+                        ])
+                    ]),
+                    "required": .array([.string("name"), .string("text")])
+                ])
+            ),
+            Tool(
+                name: "lume_screen_paste",
+                description: "Paste text into the VM by writing to the host pasteboard and sending Cmd+V via VNC. Faster than lume_screen_type for long strings. Requires the VM's clipboard sync to be active (or call this only when the host's clipboard is what you want pasted).",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "name": .object([
+                            "type": .string("string"),
+                            "description": .string("Name of a running VM with VNC active")
+                        ]),
+                        "text": .object([
+                            "type": .string("string"),
+                            "description": .string("Text to write to the host pasteboard before sending Cmd+V")
+                        ]),
+                        "storage": .object([
+                            "type": .string("string"),
+                            "description": .string("Optional storage location name or path")
+                        ])
+                    ]),
+                    "required": .array([.string("name"), .string("text")])
+                ])
+            ),
+            Tool(
                 name: "lume_host_status",
                 description: "Report host capacity: how many VMs are currently running, the maximum allowed by Apple Virtualization.framework (2 on macOS), and how many slots remain. Use this before starting or creating a new VM to avoid hitting the concurrency cap.",
                 inputSchema: .object([
@@ -672,6 +796,16 @@ final class LumeMCPServer {
                 return try await handleCreateVM(params.arguments)
             case "lume_pull_image":
                 return try await handlePullImage(params.arguments)
+            case "lume_pull_status":
+                return try await handlePullStatus(params.arguments)
+            case "lume_screen_capture":
+                return try await handleScreenCapture(params.arguments)
+            case "lume_screen_click":
+                return try await handleScreenClick(params.arguments)
+            case "lume_screen_type":
+                return try await handleScreenType(params.arguments)
+            case "lume_screen_paste":
+                return try await handleScreenPaste(params.arguments)
             case "lume_host_status":
                 return try await handleHostStatus(params.arguments)
             case "lume_wait_for_vm":
@@ -812,11 +946,21 @@ final class LumeMCPServer {
         guard let newName = args?["new_name"]?.stringValue else {
             return MCPResponse.error(operation: "clone_vm", code: "validation_error", message: "'new_name' is required")
         }
+        let sourceStorage = args?["source_storage"]?.stringValue
+        let destStorage = args?["dest_storage"]?.stringValue
 
-        try controller.clone(name: name, newName: newName)
+        try controller.clone(
+            name: name,
+            newName: newName,
+            sourceLocation: sourceStorage,
+            destLocation: destStorage ?? sourceStorage
+        )
+        var result: [String: Any] = ["source": name, "name": newName]
+        if let s = sourceStorage { result["source_storage"] = s }
+        if let d = destStorage { result["dest_storage"] = d }
         return MCPResponse.success(
             operation: "clone_vm",
-            result: ["source": name, "name": newName],
+            result: result,
             message: "VM '\(name)' cloned to '\(newName)'."
         )
     }
@@ -1044,6 +1188,35 @@ final class LumeMCPServer {
         )
     }
 
+    private func handlePullStatus(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let name = args?["name"]?.stringValue else {
+            return MCPResponse.error(operation: "pull_status", code: "validation_error", message: "'name' is required")
+        }
+
+        let progress = await PullProgressTracker.shared.getProgress(for: name)
+        let errorMsg = await PullProgressTracker.shared.getError(for: name)
+        let isPulling = await PullProgressTracker.shared.isPulling(name)
+
+        var result: [String: Any] = ["name": name]
+        if let p = progress {
+            result["state"] = "pulling"
+            result["progress"] = p              // 0.0–1.0
+            result["progress_percent"] = Int(p * 100)
+        } else if let err = errorMsg {
+            result["state"] = "error"
+            result["error"] = err
+        } else if isPulling {
+            // Edge: tracker started but progress not set yet (very early in the call).
+            result["state"] = "pulling"
+            result["progress"] = 0.0
+            result["progress_percent"] = 0
+        } else {
+            // Either not started, or completed and the tracker has cleared.
+            result["state"] = "not_pulling"
+        }
+        return MCPResponse.success(operation: "pull_status", result: result)
+    }
+
     private func handleHostStatus(_ args: [String: Value]?) async throws -> CallTool.Result {
         _ = args  // host status takes no inputs
 
@@ -1261,6 +1434,215 @@ final class LumeMCPServer {
             operation: "snapshot_delete",
             result: ["vm": vm, "snapshot": name, "snapshot_vm": snapshotVMName],
             message: "Snapshot '\(name)' deleted for VM '\(vm)'."
+        )
+    }
+
+    // MARK: - Screen tools (capture / click / type / paste)
+    //
+    // Each tool spins up a fresh VNCClient against the VM's vncUrl, runs the
+    // RFB protocol exchange, and tears down. Per-call connect is fine for
+    // one-shot operations like a screen capture or a few keystrokes; for very
+    // long type/paste sessions a connection-cache could shave handshake time
+    // (~100ms per call), but that's an optimization the LLM doesn't care
+    // about for the typical agent loop.
+
+    /// Resolves a VM's vncUrl into a connected, post-handshake VNCClient.
+    /// `vnc://:PASSWORD@HOST:PORT` is parsed via URLComponents after a
+    /// scheme swap to http (vnc isn't a registered scheme).
+    private func openVNC(forVM name: String, storage: String?) async throws -> VNCClient {
+        let vm = try controller.getDetails(name: name, storage: storage)
+        guard vm.status == "running" else {
+            throw VMError.notRunning(name)
+        }
+        guard let urlString = vm.vncUrl else {
+            throw VMError.vncNotConfigured
+        }
+        let httpish = urlString.replacingOccurrences(of: "vnc://", with: "http://")
+        guard let comps = URLComponents(string: httpish),
+              let host = comps.host,
+              let port = comps.port,
+              let password = comps.password,
+              port >= 0, port <= 65535
+        else {
+            throw VMError.internalError("Could not parse vncUrl: \(urlString)")
+        }
+        let client = VNCClient(host: host, port: UInt16(port), password: password)
+        try await client.connect()
+        try await client.handshake()
+        return client
+    }
+
+    private func handleScreenCapture(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let name = args?["name"]?.stringValue else {
+            return MCPResponse.error(operation: "screen_capture", code: "validation_error", message: "'name' is required")
+        }
+        let storage = args?["storage"]?.stringValue
+        let client = try await openVNC(forVM: name, storage: storage)
+        let cgImage = try await client.captureFramebuffer()
+
+        // CGImage -> PNG via NSBitmapImageRep (AppKit). Same path the unattended
+        // OCR layer uses internally; reliable on the runner used by tests/CI.
+        let rep = NSBitmapImageRep(cgImage: cgImage)
+        guard let pngData = rep.representation(using: .png, properties: [:]) else {
+            return MCPResponse.error(operation: "screen_capture", code: "internal_error", message: "Failed to encode framebuffer as PNG")
+        }
+        let base64 = pngData.base64EncodedString()
+
+        // Return BOTH an MCP image content item AND the standard JSON envelope
+        // sidecar so vision agents see the image inline while non-vision agents
+        // can still read the metadata (width/height/byte size).
+        let envelope: [String: Any] = [
+            "ok": true,
+            "operation": "screen_capture",
+            "result": [
+                "name": name,
+                "width": cgImage.width,
+                "height": cgImage.height,
+                "size_bytes": pngData.count,
+                "format": "image/png",
+            ],
+            "message": "Captured \(cgImage.width)x\(cgImage.height) PNG (\(pngData.count) bytes) from '\(name)'.",
+        ]
+        let envelopeData = (try? JSONSerialization.data(
+            withJSONObject: envelope, options: [.prettyPrinted, .sortedKeys])) ?? Data()
+        let envelopeText = String(data: envelopeData, encoding: .utf8) ?? "{}"
+
+        return CallTool.Result(
+            content: [
+                .image(data: base64, mimeType: "image/png", annotations: nil, _meta: nil),
+                .text(envelopeText),
+            ],
+            isError: false
+        )
+    }
+
+    private func handleScreenClick(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let name = args?["name"]?.stringValue else {
+            return MCPResponse.error(operation: "screen_click", code: "validation_error", message: "'name' is required")
+        }
+        guard let x = args?["x"]?.intValue, let y = args?["y"]?.intValue else {
+            return MCPResponse.error(operation: "screen_click", code: "validation_error", message: "'x' and 'y' are required (integer pixel coords)")
+        }
+        guard x >= 0, y >= 0, x <= Int(UInt16.max), y <= Int(UInt16.max) else {
+            return MCPResponse.error(operation: "screen_click", code: "validation_error", message: "x and y must be non-negative and fit in UInt16 (0..65535)")
+        }
+
+        let buttonStr = (args?["button"]?.stringValue ?? "left").lowercased()
+        let buttonMask: UInt8
+        switch buttonStr {
+        case "left": buttonMask = VNCMouseButton.left.rawValue
+        case "middle": buttonMask = VNCMouseButton.middle.rawValue
+        case "right": buttonMask = VNCMouseButton.right.rawValue
+        default:
+            return MCPResponse.error(operation: "screen_click", code: "validation_error", message: "'button' must be 'left', 'middle', or 'right'")
+        }
+
+        let double = args?["double"]?.boolValue ?? false
+        let storage = args?["storage"]?.stringValue
+        let client = try await openVNC(forVM: name, storage: storage)
+        let xu = UInt16(x), yu = UInt16(y)
+
+        // Move first (helps some guests register the click), then press/release.
+        // Timing mirrors VNCService.sendMouseClick — proven on macOS guests.
+        try await client.sendPointerEvent(x: xu, y: yu, buttonMask: 0)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        try await client.sendPointerEvent(x: xu, y: yu, buttonMask: buttonMask)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        try await client.sendPointerEvent(x: xu, y: yu, buttonMask: 0)
+
+        if double {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            try await client.sendPointerEvent(x: xu, y: yu, buttonMask: buttonMask)
+            try await Task.sleep(nanoseconds: 100_000_000)
+            try await client.sendPointerEvent(x: xu, y: yu, buttonMask: 0)
+        }
+
+        return MCPResponse.success(
+            operation: "screen_click",
+            result: ["name": name, "x": x, "y": y, "button": buttonStr, "double": double],
+            message: "Clicked at (\(x), \(y)) on '\(name)'\(double ? " (double)" : "")."
+        )
+    }
+
+    private func handleScreenType(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let name = args?["name"]?.stringValue else {
+            return MCPResponse.error(operation: "screen_type", code: "validation_error", message: "'name' is required")
+        }
+        guard let text = args?["text"]?.stringValue else {
+            return MCPResponse.error(operation: "screen_type", code: "validation_error", message: "'text' is required")
+        }
+        let delayMs = args?["delay_ms"]?.intValue ?? 50
+        let storage = args?["storage"]?.stringValue
+        let client = try await openVNC(forVM: name, storage: storage)
+
+        let delayNs = UInt64(max(0, delayMs)) * 1_000_000
+
+        // Reuses the top-level charToKeysym(_:) helper from src/VNC/X11Keysyms.swift
+        // so MCP and VNCService send the exact same sequence for a given character.
+        for char in text {
+            if char == "\n" {
+                // Send Return as a real key press, not a literal '\n' keysym.
+                try await client.sendKeyEvent(key: X11Keysym.returnKey.rawValue, down: true)
+                try await client.sendKeyEvent(key: X11Keysym.returnKey.rawValue, down: false)
+            } else {
+                let (keysym, needsShift) = charToKeysym(char)
+                if needsShift {
+                    try await client.sendKeyEvent(key: X11Keysym.shiftL.rawValue, down: true)
+                }
+                try await client.sendKeyEvent(key: keysym, down: true)
+                try await client.sendKeyEvent(key: keysym, down: false)
+                if needsShift {
+                    try await client.sendKeyEvent(key: X11Keysym.shiftL.rawValue, down: false)
+                }
+            }
+            if delayNs > 0 {
+                try await Task.sleep(nanoseconds: delayNs)
+            }
+        }
+
+        return MCPResponse.success(
+            operation: "screen_type",
+            result: ["name": name, "characters": text.count, "delay_ms": delayMs],
+            message: "Typed \(text.count) characters into '\(name)'."
+        )
+    }
+
+    private func handleScreenPaste(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let name = args?["name"]?.stringValue else {
+            return MCPResponse.error(operation: "screen_paste", code: "validation_error", message: "'name' is required")
+        }
+        guard let text = args?["text"]?.stringValue else {
+            return MCPResponse.error(operation: "screen_paste", code: "validation_error", message: "'text' is required")
+        }
+        let storage = args?["storage"]?.stringValue
+
+        // Write to the host pasteboard. ClipboardWatcher (if running for this VM)
+        // syncs to the guest within ~1s. If the user's VM was started without
+        // clipboard:true, this path won't deliver the text — agents that hit
+        // 'paste does nothing' should fall back to lume_screen_type.
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+
+        // Give the clipboard sync 1.2s to propagate before we send Cmd+V.
+        // Empirically reliable; lower values race with the watcher's poll cycle.
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+
+        let client = try await openVNC(forVM: name, storage: storage)
+        // Cmd+V on macOS guests: OSXvnc maps X11 Alt to macOS Command (per the
+        // VNCService.sendCharWithModifiers comments). 'V' is unshifted v + Shift,
+        // but for Cmd+V we just send the lowercase v keysym + the Cmd modifier.
+        let vKey = charToKeysym("v").keysym
+        try await client.sendKeyEvent(key: X11Keysym.altL.rawValue, down: true)  // = Command on guest
+        try await client.sendKeyEvent(key: vKey, down: true)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        try await client.sendKeyEvent(key: vKey, down: false)
+        try await client.sendKeyEvent(key: X11Keysym.altL.rawValue, down: false)
+
+        return MCPResponse.success(
+            operation: "screen_paste",
+            result: ["name": name, "characters": text.count],
+            message: "Wrote \(text.count) chars to host pasteboard and sent Cmd+V to '\(name)'. If the VM wasn't started with clipboard sync enabled, fall back to lume_screen_type."
         )
     }
 }
