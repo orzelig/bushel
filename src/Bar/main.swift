@@ -207,17 +207,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleDaemon() {
         // Snapshot the intended action before the next poll changes state.
         let shouldStop = status.reachable
+        // Spawn a detached task that doesn't capture `self` (to keep Swift 6
+        // strict isolation happy), then hop back to MainActor for any UI work.
         Task.detached { [weak self] in
             let result = Self.runLaunchctl(action: shouldStop ? "unload" : "load")
-            if !result.ok {
-                await MainActor.run {
-                    showLaunchctlAlert(action: shouldStop ? "stop" : "start", message: result.output)
-                }
-            }
-            // Refresh on main after a short delay so the menu reflects the new
-            // daemon state without waiting for the next 5s poll tick.
             try? await Task.sleep(nanoseconds: 1_500_000_000)
-            await MainActor.run { self?.refresh() }
+            // Pass `result` and `self` across the actor boundary explicitly via
+            // a Sendable-friendly call rather than capturing `self` in a closure
+            // that's both task-isolated and main-actor-isolated.
+            await Self.toggleDaemonFinish(self: self, result: result, didStop: shouldStop)
+        }
+    }
+
+    nonisolated private static func toggleDaemonFinish(
+        self appDelegate: AppDelegate?, result: (ok: Bool, output: String), didStop: Bool
+    ) async {
+        await MainActor.run {
+            if !result.ok {
+                showLaunchctlAlert(action: didStop ? "stop" : "start", message: result.output)
+            }
+            appDelegate?.refresh()
         }
     }
 
