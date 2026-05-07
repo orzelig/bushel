@@ -741,6 +741,74 @@ final class LumeMCPServer {
                 ])
             ),
             Tool(
+                name: "lume_put_file",
+                description: "Copy a file from the host into a running VM via SSH. Useful for dropping config files, scripts, or test fixtures into a sandbox. Limit: ~10 MB per file (the transport is base64-over-SSH-exec, which buffers in memory). For larger transfers, start the VM with shared_dir.",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "name": .object([
+                            "type": .string("string"),
+                            "description": .string("Name of a running VM with SSH available")
+                        ]),
+                        "host_path": .object([
+                            "type": .string("string"),
+                            "description": .string("Path on the host filesystem (~ is expanded)")
+                        ]),
+                        "vm_path": .object([
+                            "type": .string("string"),
+                            "description": .string("Destination path inside the VM. Parent directories must exist.")
+                        ]),
+                        "user": .object([
+                            "type": .string("string"),
+                            "description": .string("SSH user (default: lume)")
+                        ]),
+                        "password": .object([
+                            "type": .string("string"),
+                            "description": .string("SSH password (default: lume — the unattended-build VM credential)")
+                        ]),
+                        "storage": .object([
+                            "type": .string("string"),
+                            "description": .string("Optional storage location name or path")
+                        ])
+                    ]),
+                    "required": .array([.string("name"), .string("host_path"), .string("vm_path")])
+                ])
+            ),
+            Tool(
+                name: "lume_get_file",
+                description: "Copy a file from a running VM to the host via SSH. Same ~10 MB limit as lume_put_file (base64-over-SSH-exec buffers in memory). For larger transfers, mount a shared_dir.",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "name": .object([
+                            "type": .string("string"),
+                            "description": .string("Name of a running VM with SSH available")
+                        ]),
+                        "vm_path": .object([
+                            "type": .string("string"),
+                            "description": .string("Source path inside the VM")
+                        ]),
+                        "host_path": .object([
+                            "type": .string("string"),
+                            "description": .string("Destination path on the host filesystem (~ is expanded). Will be overwritten.")
+                        ]),
+                        "user": .object([
+                            "type": .string("string"),
+                            "description": .string("SSH user (default: lume)")
+                        ]),
+                        "password": .object([
+                            "type": .string("string"),
+                            "description": .string("SSH password (default: lume)")
+                        ]),
+                        "storage": .object([
+                            "type": .string("string"),
+                            "description": .string("Optional storage location name or path")
+                        ])
+                    ]),
+                    "required": .array([.string("name"), .string("vm_path"), .string("host_path")])
+                ])
+            ),
+            Tool(
                 name: "lume_screen_paste",
                 description: "Paste text into the VM by writing to the host pasteboard and sending Cmd+V via VNC. Faster than lume_screen_type for long strings. Requires the VM's clipboard sync to be active (or call this only when the host's clipboard is what you want pasted).",
                 inputSchema: .object([
@@ -806,6 +874,10 @@ final class LumeMCPServer {
                 return try await handleScreenType(params.arguments)
             case "lume_screen_paste":
                 return try await handleScreenPaste(params.arguments)
+            case "lume_put_file":
+                return try await handlePutFile(params.arguments)
+            case "lume_get_file":
+                return try await handleGetFile(params.arguments)
             case "lume_host_status":
                 return try await handleHostStatus(params.arguments)
             case "lume_wait_for_vm":
@@ -1604,6 +1676,138 @@ final class LumeMCPServer {
             operation: "screen_type",
             result: ["name": name, "characters": text.count, "delay_ms": delayMs],
             message: "Typed \(text.count) characters into '\(name)'."
+        )
+    }
+
+    // MARK: - File transfer
+    //
+    // SSH-based, no extra system tools. Encodes file contents as base64 and
+    // pipes through `base64 -d` / `base64` on the guest, riding the existing
+    // SSHClient.execute() one-shot command. Hard-capped at 10 MB per call
+    // because SSHResult.output buffers the whole response in memory.
+
+    private static let fileTransferMaxBytes = 10 * 1024 * 1024  // 10 MB
+
+    private func handlePutFile(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let name = args?["name"]?.stringValue else {
+            return MCPResponse.error(operation: "put_file", code: "validation_error", message: "'name' is required")
+        }
+        guard let hostPath = args?["host_path"]?.stringValue else {
+            return MCPResponse.error(operation: "put_file", code: "validation_error", message: "'host_path' is required")
+        }
+        guard let vmPath = args?["vm_path"]?.stringValue else {
+            return MCPResponse.error(operation: "put_file", code: "validation_error", message: "'vm_path' is required")
+        }
+        let user = args?["user"]?.stringValue ?? "lume"
+        let password = args?["password"]?.stringValue ?? "lume"
+        let storage = args?["storage"]?.stringValue
+
+        let vm = try controller.get(name: name, storage: storage)
+        guard let ip = vm.details.ipAddress else {
+            return MCPResponse.error(operation: "put_file", code: "vm_not_running", message: "VM '\(name)' has no IP address. Is it running?")
+        }
+
+        let expandedPath = (hostPath as NSString).expandingTildeInPath
+        let data: Data
+        do {
+            data = try Data(contentsOf: URL(fileURLWithPath: expandedPath))
+        } catch {
+            return MCPResponse.error(operation: "put_file", code: "file_not_found", message: "Could not read host file '\(hostPath)': \(error.localizedDescription)")
+        }
+        if data.count > Self.fileTransferMaxBytes {
+            return MCPResponse.error(
+                operation: "put_file",
+                code: "file_too_large",
+                message: "File is \(data.count) bytes; max \(Self.fileTransferMaxBytes) for lume_put_file. Mount a shared_dir at lume_start_vm for larger transfers."
+            )
+        }
+
+        let base64 = data.base64EncodedString()
+        // Single-quote-escape vmPath so spaces / metachars don't break the shell.
+        let safeVMPath = vmPath.replacingOccurrences(of: "'", with: "'\\''")
+        // `base64 -d` reads stdin; the `<<<` here-string keeps the entire payload
+        // off the argv (which has length limits) while still being a single shell
+        // command compatible with the SSH exec channel.
+        let cmd = "base64 -d <<< '\(base64)' > '\(safeVMPath)'"
+
+        let sshClient = SSHClient(host: ip, port: 22, user: user, password: password)
+        let result = try await sshClient.execute(command: cmd, timeout: 120)
+        guard result.exitCode == 0 else {
+            return MCPResponse.error(
+                operation: "put_file",
+                code: "command_failed",
+                message: "Failed to write '\(vmPath)': \(result.output.isEmpty ? "exit \(result.exitCode)" : result.output.trimmingCharacters(in: .whitespacesAndNewlines))"
+            )
+        }
+        return MCPResponse.success(
+            operation: "put_file",
+            result: ["name": name, "host_path": hostPath, "vm_path": vmPath, "size_bytes": data.count],
+            message: "Wrote \(data.count) bytes to '\(vmPath)' on '\(name)'."
+        )
+    }
+
+    private func handleGetFile(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let name = args?["name"]?.stringValue else {
+            return MCPResponse.error(operation: "get_file", code: "validation_error", message: "'name' is required")
+        }
+        guard let vmPath = args?["vm_path"]?.stringValue else {
+            return MCPResponse.error(operation: "get_file", code: "validation_error", message: "'vm_path' is required")
+        }
+        guard let hostPath = args?["host_path"]?.stringValue else {
+            return MCPResponse.error(operation: "get_file", code: "validation_error", message: "'host_path' is required")
+        }
+        let user = args?["user"]?.stringValue ?? "lume"
+        let password = args?["password"]?.stringValue ?? "lume"
+        let storage = args?["storage"]?.stringValue
+
+        let vm = try controller.get(name: name, storage: storage)
+        guard let ip = vm.details.ipAddress else {
+            return MCPResponse.error(operation: "get_file", code: "vm_not_running", message: "VM '\(name)' has no IP address. Is it running?")
+        }
+
+        let safeVMPath = vmPath.replacingOccurrences(of: "'", with: "'\\''")
+        // wc -c first so we can refuse oversized files before pulling all bytes.
+        let sshClient = SSHClient(host: ip, port: 22, user: user, password: password)
+        let sizeResult = try await sshClient.execute(
+            command: "wc -c < '\(safeVMPath)' 2>/dev/null || echo MISSING", timeout: 30)
+        let sizeStr = sizeResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if sizeStr == "MISSING" || sizeResult.exitCode != 0 {
+            return MCPResponse.error(operation: "get_file", code: "file_not_found", message: "VM file '\(vmPath)' not readable")
+        }
+        if let bytes = Int(sizeStr), bytes > Self.fileTransferMaxBytes {
+            return MCPResponse.error(
+                operation: "get_file",
+                code: "file_too_large",
+                message: "File is \(bytes) bytes; max \(Self.fileTransferMaxBytes) for lume_get_file. Mount a shared_dir for larger transfers."
+            )
+        }
+
+        let result = try await sshClient.execute(command: "base64 < '\(safeVMPath)'", timeout: 120)
+        guard result.exitCode == 0 else {
+            return MCPResponse.error(
+                operation: "get_file",
+                code: "command_failed",
+                message: "Failed to read '\(vmPath)': \(result.output.isEmpty ? "exit \(result.exitCode)" : result.output.trimmingCharacters(in: .whitespacesAndNewlines))"
+            )
+        }
+
+        // base64 output may be wrapped (BSD base64 wraps at 76 cols); strip whitespace.
+        let stripped = result.output.filter { !$0.isWhitespace }
+        guard let data = Data(base64Encoded: stripped) else {
+            return MCPResponse.error(operation: "get_file", code: "internal_error", message: "Could not decode base64 output from VM")
+        }
+
+        let expandedPath = (hostPath as NSString).expandingTildeInPath
+        do {
+            try data.write(to: URL(fileURLWithPath: expandedPath))
+        } catch {
+            return MCPResponse.error(operation: "get_file", code: "internal_error", message: "Could not write host file '\(hostPath)': \(error.localizedDescription)")
+        }
+
+        return MCPResponse.success(
+            operation: "get_file",
+            result: ["name": name, "vm_path": vmPath, "host_path": hostPath, "size_bytes": data.count],
+            message: "Read \(data.count) bytes from '\(vmPath)' on '\(name)' -> '\(hostPath)'."
         )
     }
 
