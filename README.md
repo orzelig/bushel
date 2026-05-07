@@ -17,7 +17,7 @@ See [UPSTREAM-STATUS.md](UPSTREAM-STATUS.md) for the full relationship to upstre
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/orzelig/bushel/main/scripts/install.sh)"
 ```
 
-Installs the `bushel` binary to `~/.local/bin/bushel` and registers a LaunchAgent (`dev.orzelig.bushel.daemon`) for `bushel serve` on `127.0.0.1:7777`. Apple Silicon only. No telemetry, no auto-update by default.
+Installs the `bushel` binary to `~/.local/bin/bushel` and registers a LaunchAgent (`io.github.orzelig.bushel.daemon`) for `bushel serve` on `127.0.0.1:7777`. Apple Silicon only. No telemetry, no auto-update by default.
 
 To uninstall: `bash <(curl -fsSL https://raw.githubusercontent.com/orzelig/bushel/main/scripts/uninstall.sh)`. User data in `~/.lume` and `~/.config/lume` is preserved unless you pass `--purge`.
 
@@ -58,7 +58,7 @@ Bushel renames only the binary. Everything else is wire-compatible with lume:
 - **Image registry**: bushel reads and writes images with `org.trycua.lume.*` OCI annotations — fully interoperable with images pushed by lume
 - **VM credentials**: default `lume`/`lume` user inside unattended-built VMs (these are baked into the VM image, not the binary)
 
-You can run lume and bushel side by side; their LaunchAgent labels differ (`com.trycua.lume_daemon` vs `dev.orzelig.bushel.daemon`), but they'll fight over port 7777 — only run one daemon at a time.
+You can run lume and bushel side by side; their LaunchAgent labels differ (`com.trycua.lume_daemon` vs `io.github.orzelig.bushel.daemon`), but they'll fight over port 7777 — only run one daemon at a time.
 
 ## Documentation
 

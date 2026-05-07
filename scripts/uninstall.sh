@@ -46,7 +46,7 @@ fail()  { echo "${RED}error:${NORMAL} $*" >&2; exit 1; }
 # Configuration (must match install.sh)
 # ----------------------------------------------------------------------------
 BINARY_NAME="bushel"
-SERVICE_LABEL="dev.orzelig.bushel.daemon"
+SERVICE_LABEL="io.github.orzelig.bushel.daemon"
 PLIST_PATH="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
 DAEMON_LOG="/tmp/bushel_daemon.log"
 DAEMON_ERR_LOG="/tmp/bushel_daemon.error.log"
@@ -130,6 +130,17 @@ fi
 if launchctl list 2>/dev/null | grep -q "$SERVICE_LABEL"; then
   launchctl remove "$SERVICE_LABEL" 2>/dev/null || true
 fi
+
+# Also clean up the legacy bushel <= 0.4.0-bushel.6 LaunchAgent label so users
+# who installed before the rename don't end up with an orphaned plist.
+LEGACY_PLIST="$HOME/Library/LaunchAgents/dev.orzelig.bushel.daemon.plist"
+if [ -f "$LEGACY_PLIST" ]; then
+  launchctl unload "$LEGACY_PLIST" 2>/dev/null || true
+  rm -f "$LEGACY_PLIST"
+  ok "Removed legacy LaunchAgent: $LEGACY_PLIST"
+  REMOVED+=("$LEGACY_PLIST")
+fi
+launchctl remove "dev.orzelig.bushel.daemon" 2>/dev/null || true
 
 # ============================================================================
 # Phase 3: remove binary

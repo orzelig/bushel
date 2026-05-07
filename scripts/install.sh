@@ -35,7 +35,7 @@ BINARY_NAME="bushel"
 DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
 RESOURCE_DIR="$HOME/.local/share/bushel"
-SERVICE_LABEL="dev.orzelig.bushel.daemon"
+SERVICE_LABEL="io.github.orzelig.bushel.daemon"
 PLIST_PATH="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
 DAEMON_LOG="/tmp/bushel_daemon.log"
 DAEMON_ERR_LOG="/tmp/bushel_daemon.error.log"
@@ -219,6 +219,16 @@ install_launch_agent() {
   # the previous daemon attached to a stale binary.
   [ -f "$PLIST_PATH" ] && launchctl unload "$PLIST_PATH" 2>/dev/null || true
 
+  # Migration from bushel <= 0.4.0-bushel.6, which used the prefix
+  # 'dev.orzelig.bushel.*'. Unload and remove the old plist so an upgrade
+  # doesn't leave two daemons fighting over port 7777.
+  local legacy_plist="$HOME/Library/LaunchAgents/dev.orzelig.bushel.daemon.plist"
+  if [ -f "$legacy_plist" ]; then
+    launchctl unload "$legacy_plist" 2>/dev/null || true
+    rm -f "$legacy_plist"
+    info "Removed legacy LaunchAgent (dev.orzelig.bushel.daemon)."
+  fi
+
   local tmpl
   tmpl=$(cat <<'PLIST_EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -226,7 +236,7 @@ install_launch_agent() {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>dev.orzelig.bushel.daemon</string>
+    <string>io.github.orzelig.bushel.daemon</string>
     <key>ProgramArguments</key>
     <array>
         <string>__BUSHEL_BIN__</string>

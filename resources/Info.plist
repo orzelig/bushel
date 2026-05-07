@@ -4,7 +4,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>dev.orzelig.bushel</string>
+	<string>io.github.orzelig.bushel</string>
 	<key>CFBundleExecutable</key>
 	<string>bushel</string>
 	<key>CFBundleName</key>
