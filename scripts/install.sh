@@ -322,9 +322,12 @@ print_summary() {
 
   echo ""
   echo "${BOLD}Use with Claude:${NORMAL}"
-  echo "  1. ${bushel_cmd} claude-setup"
-  echo "  2. Restart Claude (Desktop and/or Code)"
-  echo "  3. Tell Claude: ${BOLD}\"Start using bushel.\"${NORMAL}"
+  echo "  If you already have Claude Code open, just tell it:"
+  echo "      ${BOLD}\"Run bushel claude-setup, then I'll restart you.\"${NORMAL}"
+  echo "  Otherwise, run it yourself: ${BOLD}${bushel_cmd} claude-setup${NORMAL}"
+  echo ""
+  echo "  Then restart Claude (Desktop and/or Code) and ask it:"
+  echo "      ${BOLD}\"Start using bushel.\"${NORMAL}"
   echo ""
   echo "Or just run ${BOLD}${bushel_cmd} --help${NORMAL}."
 }

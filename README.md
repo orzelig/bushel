@@ -30,19 +30,23 @@ swift build -c release
 
 ## Use with Claude
 
-After installing:
+If you already have Claude Code open, just tell it:
+
+> Run `bushel claude-setup`, then I'll restart you.
+
+Claude will execute the command via its Bash tool. Otherwise, run it yourself:
 
 ```bash
 bushel claude-setup
 ```
 
-This detects Claude Desktop and Claude Code on your machine, registers bushel as an MCP server in each, and tells you to restart the client. Then tell Claude:
+Either way, restart Claude (Desktop and/or Code), then ask:
 
 > Start using bushel.
 
-That's it. Claude can now drive bushel's 10 MCP tools (list/get/start/stop/clone/delete/exec/create VMs, plus pull-image and host-status).
+That's it — Claude can now drive bushel's 10 MCP tools (list/get/start/stop/clone/delete/exec/create VMs, plus pull-image and host-status).
 
-`claude-setup` is idempotent — re-running it is a safe no-op when the config is already correct. Use `--dry-run` to see what it would change, or `--print-only` to get the Claude Desktop config snippet without writing files.
+`claude-setup` detects Claude Desktop and Claude Code on your machine and registers bushel as an MCP server in each. It's idempotent — re-running it is a safe no-op when the config is already correct. Use `--dry-run` to preview, or `--print-only` to get the Claude Desktop config snippet for manual paste.
 
 ## Compatibility with lume
 
