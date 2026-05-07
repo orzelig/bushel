@@ -318,13 +318,17 @@ final class LumeMCPServer {
         [
             Tool(
                 name: "lume_list_vms",
-                description: "List all virtual machines with their status, IP addresses, and resource allocation",
+                description: "List all virtual machines with their status, IP addresses, and resource allocation. Snapshots (VMs whose name contains '__snap__') are filtered out by default — pass include_snapshots=true to see them.",
                 inputSchema: .object([
                     "type": .string("object"),
                     "properties": .object([
                         "storage": .object([
                             "type": .string("string"),
                             "description": .string("Optional storage location name or path to filter VMs")
+                        ]),
+                        "include_snapshots": .object([
+                            "type": .string("boolean"),
+                            "description": .string("Include snapshot VMs in the listing (default: false). Use lume_snapshot_list for a structured view of one VM's snapshots.")
                         ])
                     ])
                 ])
@@ -537,6 +541,74 @@ final class LumeMCPServer {
                 ])
             ),
             Tool(
+                name: "lume_snapshot_create",
+                description: "Snapshot a VM via APFS clonefile (near-instant copy-on-write — disk usage grows only as the snapshot diverges). The VM must be stopped: Apple Virtualization.framework doesn't support quiesced live snapshots, so call lume_stop_vm first if needed. The snapshot is stored as a hidden VM named '<vm>__snap__<name>'.",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "vm": .object([
+                            "type": .string("string"),
+                            "description": .string("Name of the VM to snapshot. Must be stopped.")
+                        ]),
+                        "name": .object([
+                            "type": .string("string"),
+                            "description": .string("Snapshot identifier. Cannot contain '__snap__'.")
+                        ])
+                    ]),
+                    "required": .array([.string("vm"), .string("name")])
+                ])
+            ),
+            Tool(
+                name: "lume_snapshot_list",
+                description: "List snapshots of a VM (VMs whose name matches '<vm>__snap__*').",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "vm": .object([
+                            "type": .string("string"),
+                            "description": .string("Name of the parent VM")
+                        ])
+                    ]),
+                    "required": .array([.string("vm")])
+                ])
+            ),
+            Tool(
+                name: "lume_snapshot_restore",
+                description: "Restore a VM from a snapshot. Deletes the current VM (if it exists) and clones the snapshot back to that name. Both the VM and its snapshot must be stopped. Idempotent: works even if the VM was previously deleted.",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "vm": .object([
+                            "type": .string("string"),
+                            "description": .string("Name of the VM to restore (will be deleted then recreated from snapshot)")
+                        ]),
+                        "name": .object([
+                            "type": .string("string"),
+                            "description": .string("Snapshot identifier to restore from")
+                        ])
+                    ]),
+                    "required": .array([.string("vm"), .string("name")])
+                ])
+            ),
+            Tool(
+                name: "lume_snapshot_delete",
+                description: "Delete a snapshot. The parent VM is unaffected.",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "vm": .object([
+                            "type": .string("string"),
+                            "description": .string("Name of the parent VM")
+                        ]),
+                        "name": .object([
+                            "type": .string("string"),
+                            "description": .string("Snapshot identifier to delete")
+                        ])
+                    ]),
+                    "required": .array([.string("vm"), .string("name")])
+                ])
+            ),
+            Tool(
                 name: "lume_pull_image",
                 description: "Pull a pre-built VM image from a container registry (e.g. ghcr.io/trycua/macos-sequoia-vanilla:latest, ubuntu-noble-vanilla:latest) into local storage. Async — returns immediately while the download proceeds in the background. Large macOS images can take 5–30 minutes; use lume_list_vms or lume_get_vm with the resolved VM name to detect when the VM appears in the local list. Linux pulls are typically 1–5 minutes.",
                 inputSchema: .object([
@@ -604,6 +676,14 @@ final class LumeMCPServer {
                 return try await handleHostStatus(params.arguments)
             case "lume_wait_for_vm":
                 return try await handleWaitForVM(params.arguments)
+            case "lume_snapshot_create":
+                return try await handleSnapshotCreate(params.arguments)
+            case "lume_snapshot_list":
+                return try await handleSnapshotList(params.arguments)
+            case "lume_snapshot_restore":
+                return try await handleSnapshotRestore(params.arguments)
+            case "lume_snapshot_delete":
+                return try await handleSnapshotDelete(params.arguments)
             default:
                 return MCPResponse.error(
                     operation: "unknown",
@@ -623,13 +703,24 @@ final class LumeMCPServer {
 
     private func handleListVMs(_ args: [String: Value]?) async throws -> CallTool.Result {
         let storage = args?["storage"]?.stringValue
-        let vms = try controller.list(storage: storage)
+        let includeSnapshots = args?["include_snapshots"]?.boolValue ?? false
+        var vms = try controller.list(storage: storage)
+        if !includeSnapshots {
+            // Hide snapshots — they have a structural name shape '<vm>__snap__<id>'.
+            // Use lume_snapshot_list for a structured view of one VM's snapshots.
+            vms = vms.filter { !$0.name.contains(Self.snapshotSeparator) }
+        }
         // Re-serialize via Codable then parse back to [Any] so the envelope's
         // JSONSerialization-based payload can include the structured VM list.
         let encoded = try JSONEncoder().encode(vms)
         let asArray = (try JSONSerialization.jsonObject(with: encoded) as? [Any]) ?? []
         return MCPResponse.success(operation: "list_vms", resultArray: asArray)
     }
+
+    /// Naming convention for snapshots: a snapshot of VM "foo" with id "bar" is stored
+    /// as VM "foo__snap__bar". Brittle if a user happens to give a real VM that name,
+    /// but documented; saves us from adding a sidecar database.
+    private static let snapshotSeparator = "__snap__"
 
     private func handleGetVM(_ args: [String: Value]?) async throws -> CallTool.Result {
         guard let name = args?["name"]?.stringValue else {
@@ -1048,6 +1139,129 @@ final class LumeMCPServer {
         default:
             return false
         }
+    }
+
+    // MARK: - Snapshots
+    //
+    // Backed by lume's existing clone() (which uses APFS clonefile() under the hood,
+    // so disk.img is duplicated near-instantly with copy-on-write semantics — the
+    // snapshot's storage cost grows only as it diverges from the source). The naming
+    // convention <vm>__snap__<name> hides snapshots from lume_list_vms by default
+    // and is parsed in lume_snapshot_list for structured output.
+    //
+    // Limitation: clone() requires the source VM to be stopped, so snapshot/restore
+    // require a stop+start cycle around them. Live snapshots would need a quiesced
+    // disk-state hook the Apple Virtualization.framework doesn't expose.
+
+    private func handleSnapshotCreate(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let vm = args?["vm"]?.stringValue else {
+            return MCPResponse.error(operation: "snapshot_create", code: "validation_error", message: "'vm' is required")
+        }
+        guard let name = args?["name"]?.stringValue, !name.isEmpty else {
+            return MCPResponse.error(operation: "snapshot_create", code: "validation_error", message: "'name' is required and must be non-empty")
+        }
+        guard !name.contains(Self.snapshotSeparator) else {
+            return MCPResponse.error(
+                operation: "snapshot_create",
+                code: "validation_error",
+                message: "Snapshot name must not contain '\(Self.snapshotSeparator)'"
+            )
+        }
+
+        let snapshotVMName = "\(vm)\(Self.snapshotSeparator)\(name)"
+        try controller.clone(name: vm, newName: snapshotVMName)
+
+        return MCPResponse.success(
+            operation: "snapshot_create",
+            result: ["vm": vm, "snapshot": name, "snapshot_vm": snapshotVMName],
+            message: "Snapshot '\(name)' created for VM '\(vm)'."
+        )
+    }
+
+    private func handleSnapshotList(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let vm = args?["vm"]?.stringValue else {
+            return MCPResponse.error(operation: "snapshot_list", code: "validation_error", message: "'vm' is required")
+        }
+
+        let prefix = "\(vm)\(Self.snapshotSeparator)"
+        let allVMs = try controller.list(storage: nil)
+        let snapshots: [[String: Any]] = allVMs
+            .filter { $0.name.hasPrefix(prefix) }
+            .map { details in
+                let snapName = String(details.name.dropFirst(prefix.count))
+                return [
+                    "name": snapName,
+                    "snapshot_vm": details.name,
+                    "status": details.status,
+                    "os": details.os,
+                    "location": details.locationName,
+                ]
+            }
+
+        return MCPResponse.success(
+            operation: "snapshot_list",
+            result: ["vm": vm, "snapshots": snapshots, "count": snapshots.count]
+        )
+    }
+
+    private func handleSnapshotRestore(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let vm = args?["vm"]?.stringValue else {
+            return MCPResponse.error(operation: "snapshot_restore", code: "validation_error", message: "'vm' is required")
+        }
+        guard let name = args?["name"]?.stringValue else {
+            return MCPResponse.error(operation: "snapshot_restore", code: "validation_error", message: "'name' is required")
+        }
+
+        let snapshotVMName = "\(vm)\(Self.snapshotSeparator)\(name)"
+
+        // Snapshot must exist; surface vm_not_found rather than letting clone() fail
+        // halfway through (after we've already deleted the original VM).
+        do {
+            _ = try controller.get(name: snapshotVMName)
+        } catch {
+            return MCPResponse.error(
+                operation: "snapshot_restore",
+                code: "vm_not_found",
+                message: "Snapshot '\(name)' not found for VM '\(vm)' (looked for '\(snapshotVMName)')"
+            )
+        }
+
+        // Delete current VM if it exists. We swallow not-found errors — the user may
+        // be restoring into a slot where the VM was already deleted.
+        do {
+            try await controller.delete(name: vm, storage: nil)
+        } catch {
+            if MCPResponse.errorCode(for: error) != "vm_not_found" {
+                throw error
+            }
+        }
+
+        // Clone snapshot back to the original name. APFS clonefile = ~instant.
+        try controller.clone(name: snapshotVMName, newName: vm)
+
+        return MCPResponse.success(
+            operation: "snapshot_restore",
+            result: ["vm": vm, "snapshot": name, "from": snapshotVMName],
+            message: "VM '\(vm)' restored from snapshot '\(name)'."
+        )
+    }
+
+    private func handleSnapshotDelete(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let vm = args?["vm"]?.stringValue else {
+            return MCPResponse.error(operation: "snapshot_delete", code: "validation_error", message: "'vm' is required")
+        }
+        guard let name = args?["name"]?.stringValue else {
+            return MCPResponse.error(operation: "snapshot_delete", code: "validation_error", message: "'name' is required")
+        }
+
+        let snapshotVMName = "\(vm)\(Self.snapshotSeparator)\(name)"
+        try await controller.delete(name: snapshotVMName, storage: nil)
+
+        return MCPResponse.success(
+            operation: "snapshot_delete",
+            result: ["vm": vm, "snapshot": name, "snapshot_vm": snapshotVMName],
+            message: "Snapshot '\(name)' deleted for VM '\(vm)'."
+        )
     }
 }
 
