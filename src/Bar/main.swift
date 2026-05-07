@@ -249,6 +249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - Alerts
 
+@MainActor
 private func showDashboardMissingAlert() {
     let alert = NSAlert()
     alert.messageText = "Dashboard not running"
@@ -263,6 +264,7 @@ private func showDashboardMissingAlert() {
     alert.runModal()
 }
 
+@MainActor
 private func showLaunchctlAlert(action: String, message: String) {
     let alert = NSAlert()
     alert.messageText = "Could not \(action) bushel daemon"
