@@ -40,21 +40,26 @@ PLIST_PATH="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
 DAEMON_LOG="/tmp/bushel_daemon.log"
 DAEMON_ERR_LOG="/tmp/bushel_daemon.error.log"
 BUSHEL_PORT="${BUSHEL_PORT:-7777}"
-ENABLE_AUTO_UPDATE=false
+ENABLE_AUTO_UPDATE_CHECK=true   # daily check + macOS notification (no auto-apply)
 INSTALL_BACKGROUND_SERVICE=true
 VERSION_TAG=""  # empty = latest
+UPDATER_LABEL="io.github.orzelig.bushel.updater"
+UPDATER_PLIST_PATH="$HOME/Library/LaunchAgents/${UPDATER_LABEL}.plist"
+UPDATER_LOG="/tmp/bushel_updater.log"
+UPDATER_ERR_LOG="/tmp/bushel_updater.error.log"
 
 usage() {
   cat <<USAGE
 ${BOLD}${BLUE}Bushel Installer${NORMAL}
 Usage: $0 [OPTIONS]
 
-  --install-dir DIR        Binary install dir (default: ${DEFAULT_INSTALL_DIR})
-  --port PORT              Daemon port (default: 7777, wire-compatible with lume)
-  --version TAG            Pin to a release tag (e.g. v0.4.0-bushel.0)
-  --enable-auto-update     Opt in to the (stub) auto-updater
-  --no-background-service  Skip the LaunchAgent setup
-  --help                   This message
+  --install-dir DIR         Binary install dir (default: ${DEFAULT_INSTALL_DIR})
+  --port PORT               Daemon port (default: 7777, wire-compatible with lume)
+  --version TAG             Pin to a release tag (e.g. v0.4.0-bushel.0)
+  --no-auto-update-check    Skip the daily 'bushel update --check-only --notify'
+                            LaunchAgent (still installs the 'bushel update' subcommand).
+  --no-background-service   Skip the daemon LaunchAgent setup entirely
+  --help                    This message
 
 Env vars: INSTALL_DIR, BUSHEL_PORT (same as flags above).
 USAGE
@@ -69,7 +74,7 @@ while [ "$#" -gt 0 ]; do
     --port=*) BUSHEL_PORT="${1#*=}" ;;
     --version) VERSION_TAG="${2:-}"; shift ;;
     --version=*) VERSION_TAG="${1#*=}" ;;
-    --enable-auto-update) ENABLE_AUTO_UPDATE=true ;;
+    --no-auto-update-check) ENABLE_AUTO_UPDATE_CHECK=false ;;
     --no-background-service) INSTALL_BACKGROUND_SERVICE=false ;;
     --help|-h) usage; exit 0 ;;
     *) echo "${RED}Unknown option: $1${NORMAL}"; usage; exit 1 ;;
@@ -294,13 +299,59 @@ PLIST_EOF
 }
 
 # ============================ Phase 5: post-install ========================
-auto_updater_note() {
-  if [ "$ENABLE_AUTO_UPDATE" = true ]; then
-    info "Auto-update opt-in noted. Periodic checking isn't wired up yet —"
-    info "run \`$BINARY_NAME update\` (or \`$BINARY_NAME update --check-only\`)"
-    info "to see and apply new releases. SHA-256 is verified before swap."
-    # TODO(bushel): LaunchAgent that periodically runs `bushel update --check-only`
-    # and surfaces a macOS notification when an update is available.
+install_update_check_agent() {
+  if [ "$ENABLE_AUTO_UPDATE_CHECK" != true ]; then
+    info "Daily update-check LaunchAgent: skipped (--no-auto-update-check)."
+    return 0
+  fi
+
+  # Idempotent: unload any prior version before writing.
+  [ -f "$UPDATER_PLIST_PATH" ] && launchctl unload "$UPDATER_PLIST_PATH" 2>/dev/null || true
+
+  local tmpl
+  tmpl=$(cat <<'PLIST_EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.github.orzelig.bushel.updater</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__BUSHEL_BIN__</string>
+        <string>update</string>
+        <string>--check-only</string>
+        <string>--notify</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>10</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/tmp/bushel_updater.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/bushel_updater.error.log</string>
+</dict>
+</plist>
+PLIST_EOF
+)
+  printf '%s\n' "$tmpl" \
+    | sed "s|__BUSHEL_BIN__|$INSTALL_DIR/$BINARY_NAME|g" \
+    > "$UPDATER_PLIST_PATH"
+  chmod 644 "$UPDATER_PLIST_PATH"
+  plutil -lint "$UPDATER_PLIST_PATH" >/dev/null || fail "Generated updater plist is invalid: $UPDATER_PLIST_PATH"
+
+  if launchctl load "$UPDATER_PLIST_PATH" 2>/dev/null; then
+    ok "Daily update check installed: ${BOLD}$UPDATER_LABEL${NORMAL} (10:00 daily)."
+    info "  The check runs '$BINARY_NAME update --check-only --notify'. It posts a"
+    info "  macOS notification when an update is available; it never auto-applies."
+  else
+    warn "Failed to load update-check LaunchAgent. Run 'launchctl load $UPDATER_PLIST_PATH' manually."
   fi
 }
 
@@ -350,7 +401,7 @@ main() {
   download_release
   install_artifacts
   install_launch_agent
-  auto_updater_note
+  install_update_check_agent
   print_summary
 }
 

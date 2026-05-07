@@ -50,6 +50,8 @@ SERVICE_LABEL="io.github.orzelig.bushel.daemon"
 PLIST_PATH="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
 DAEMON_LOG="/tmp/bushel_daemon.log"
 DAEMON_ERR_LOG="/tmp/bushel_daemon.error.log"
+UPDATER_LOG="/tmp/bushel_updater.log"
+UPDATER_ERR_LOG="/tmp/bushel_updater.error.log"
 RESOURCE_DIR="$HOME/.local/share/bushel"
 
 PURGE=false
@@ -142,6 +144,17 @@ if [ -f "$LEGACY_PLIST" ]; then
 fi
 launchctl remove "dev.orzelig.bushel.daemon" 2>/dev/null || true
 
+# Remove the daily update-check LaunchAgent if installed.
+UPDATER_LABEL="io.github.orzelig.bushel.updater"
+UPDATER_PLIST="$HOME/Library/LaunchAgents/${UPDATER_LABEL}.plist"
+if [ -f "$UPDATER_PLIST" ]; then
+  launchctl unload "$UPDATER_PLIST" 2>/dev/null || true
+  rm -f "$UPDATER_PLIST"
+  ok "Removed update-check LaunchAgent: $UPDATER_PLIST"
+  REMOVED+=("$UPDATER_PLIST")
+fi
+launchctl remove "$UPDATER_LABEL" 2>/dev/null || true
+
 # ============================================================================
 # Phase 3: remove binary
 # ============================================================================
@@ -180,7 +193,7 @@ fi
 # Phase 4: remove log files
 # ============================================================================
 info "Removing log files..."
-for logfile in "$DAEMON_LOG" "$DAEMON_ERR_LOG"; do
+for logfile in "$DAEMON_LOG" "$DAEMON_ERR_LOG" "$UPDATER_LOG" "$UPDATER_ERR_LOG"; do
   if [ -f "$logfile" ]; then
     rm -f "$logfile"
     ok "Removed: $logfile"

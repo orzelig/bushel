@@ -30,6 +30,9 @@ struct Update: AsyncParsableCommand {
     @Flag(name: .long, help: "Only check whether an update is available; exit 0 if up-to-date, exit 1 if newer release available.")
     var checkOnly: Bool = false
 
+    @Flag(name: .long, help: "When combined with --check-only, post a macOS notification if an update is available. The LaunchAgent installer wires this up for the daily background check.")
+    var notify: Bool = false
+
     func run() async throws {
         let current = Lume.Version.current
         print("Current: \(current)")
@@ -51,6 +54,9 @@ struct Update: AsyncParsableCommand {
         print("https://github.com/orzelig/bushel/releases/tag/\(latest)")
 
         if checkOnly {
+            if notify {
+                postUpdateNotification(current: current, latest: latest)
+            }
             // Exit code 1 signals "update available" to shell scripts.
             throw ExitCode(1)
         }
@@ -227,6 +233,20 @@ struct Update: AsyncParsableCommand {
             throw UpdateError.malformedSha("shasum output unparseable")
         }
         return String(token).lowercased()
+    }
+
+    /// Post a macOS notification via osascript. Used by the daily LaunchAgent
+    /// (--check-only --notify) so users see updates without having to remember
+    /// to run the command themselves. Best-effort: failures here are swallowed.
+    private func postUpdateNotification(current: String, latest: String) {
+        let title = "Bushel update available"
+        let body = "\(current) -> \(latest). Run \\\"bushel update\\\" to apply."
+        let script = "display notification \"\(body)\" with title \"\(title)\""
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        try? process.run()
+        process.waitUntilExit()
     }
 
     @discardableResult
