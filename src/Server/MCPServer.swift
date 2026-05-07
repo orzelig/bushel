@@ -149,7 +149,7 @@ final class LumeMCPServer {
         ### 3. Start the VM
         Start with optional shared directory for file access:
         ```
-        lume_run_vm(name: "sandbox", shared_dir: "~/project", no_display: true)
+        lume_start_vm(name: "sandbox", shared_dir: "~/project", no_display: true)
         ```
         Shared files appear in the VM at `/Volumes/My Shared Files/`.
 
@@ -282,8 +282,8 @@ final class LumeMCPServer {
 
                         Steps:
                         1. First check if the VM exists and is running (lume_list_vms)
-                        2. If stopped, start it with lume_run_vm
-                        3. Wait for it to get an IP address (lume_get_vm)
+                        2. If stopped, start it with lume_start_vm
+                        3. Wait for it to be reachable (lume_wait_for_vm with condition: "ssh_ready")
                         4. Execute the command with lume_exec
                         5. Report the output
                         """)
@@ -348,8 +348,8 @@ final class LumeMCPServer {
                 ])
             ),
             Tool(
-                name: "lume_run_vm",
-                description: "Start a VM with optional shared directory for file access. The shared directory will be available at /Volumes/My Shared Files inside the VM.",
+                name: "lume_start_vm",
+                description: "Start a VM with optional shared directory and host-clipboard sharing. Shared dir appears at /Volumes/My Shared Files inside the VM. Returns immediately while the VM boots — use lume_wait_for_vm with condition='ssh_ready' to wait until the VM is reachable. (Also accepts the legacy name 'lume_run_vm'.)",
                 inputSchema: .object([
                     "type": .string("object"),
                     "properties": .object([
@@ -364,6 +364,10 @@ final class LumeMCPServer {
                         "no_display": .object([
                             "type": .string("boolean"),
                             "description": .string("Run headless without VNC window (default: true)")
+                        ]),
+                        "clipboard": .object([
+                            "type": .string("boolean"),
+                            "description": .string("Share clipboard between host and VM (default: false). Requires macOS 15+ on host and guest.")
                         ]),
                         "storage": .object([
                             "type": .string("string"),
@@ -459,7 +463,7 @@ final class LumeMCPServer {
             ),
             Tool(
                 name: "lume_create_vm",
-                description: "Create a new macOS VM asynchronously. Returns immediately while the VM is being provisioned. Poll lume_list_vms or lume_get_vm to check progress (status will be 'provisioning' until complete).",
+                description: "Create a new VM asynchronously. Returns immediately while the VM is provisioned. Poll lume_list_vms / lume_get_vm or block via lume_wait_for_vm to track progress. Supports macOS (requires IPSW; can run unattended Setup Assistant) and Linux (empty disk, IPSW not used).",
                 inputSchema: .object([
                     "type": .string("object"),
                     "properties": .object([
@@ -467,13 +471,18 @@ final class LumeMCPServer {
                             "type": .string("string"),
                             "description": .string("Name for the new VM")
                         ]),
+                        "os": .object([
+                            "type": .string("string"),
+                            "enum": .array([.string("macos"), .string("linux")]),
+                            "description": .string("Operating system (default: 'macos'). Linux VMs ignore 'ipsw' and 'unattended'.")
+                        ]),
                         "ipsw": .object([
                             "type": .string("string"),
-                            "description": .string("Path to IPSW file or 'latest' to download (default: latest)")
+                            "description": .string("[macOS only] Path to IPSW file or 'latest' to download (default: 'latest')")
                         ]),
                         "unattended": .object([
                             "type": .string("string"),
-                            "description": .string("Unattended setup preset (e.g., 'tahoe', 'sequoia') for automatic macOS configuration")
+                            "description": .string("[macOS only] Unattended Setup Assistant preset name ('tahoe', 'sequoia') or path to a YAML config")
                         ]),
                         "cpu": .object([
                             "type": .string("integer"),
@@ -486,6 +495,38 @@ final class LumeMCPServer {
                         "disk_size": .object([
                             "type": .string("string"),
                             "description": .string("Disk size, e.g., '64GB' (default: 64GB)")
+                        ]),
+                        "storage": .object([
+                            "type": .string("string"),
+                            "description": .string("Optional storage location name or path")
+                        ])
+                    ]),
+                    "required": .array([.string("name")])
+                ])
+            ),
+            Tool(
+                name: "lume_wait_for_vm",
+                description: "Block until a VM reaches a requested state (or timeout). Replaces the manual polling loop agents would otherwise have to write around lume_get_vm. Most agents want condition='ssh_ready', which means the VM is running AND SSH is reachable on it.",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "name": .object([
+                            "type": .string("string"),
+                            "description": .string("Name of the VM to wait on")
+                        ]),
+                        "condition": .object([
+                            "type": .string("string"),
+                            "enum": .array([
+                                .string("running"),
+                                .string("stopped"),
+                                .string("ssh_ready"),
+                                .string("provisioning_complete")
+                            ]),
+                            "description": .string("Default 'ssh_ready'. 'running' = VM in running state. 'stopped' = VM stopped. 'ssh_ready' = running AND SSH reachable. 'provisioning_complete' = VM finished initial setup (status no longer 'provisioning').")
+                        ]),
+                        "timeout_seconds": .object([
+                            "type": .string("integer"),
+                            "description": .string("Maximum seconds to wait. Default: 300 (5 min). For freshly created macOS VMs, allow 600+ to cover IPSW install and Setup Assistant.")
                         ]),
                         "storage": .object([
                             "type": .string("string"),
@@ -545,7 +586,7 @@ final class LumeMCPServer {
                 return try await handleListVMs(params.arguments)
             case "lume_get_vm":
                 return try await handleGetVM(params.arguments)
-            case "lume_run_vm":
+            case "lume_run_vm", "lume_start_vm":  // run_vm kept as legacy alias
                 return try await handleRunVM(params.arguments)
             case "lume_stop_vm":
                 return try await handleStopVM(params.arguments)
@@ -561,6 +602,8 @@ final class LumeMCPServer {
                 return try await handlePullImage(params.arguments)
             case "lume_host_status":
                 return try await handleHostStatus(params.arguments)
+            case "lume_wait_for_vm":
+                return try await handleWaitForVM(params.arguments)
             default:
                 return CallTool.Result(
                     content: [.text("Unknown tool: \(params.name)")],
@@ -746,7 +789,14 @@ final class LumeMCPServer {
             return CallTool.Result(content: [.text("Error: 'name' is required")], isError: true)
         }
 
-        let ipsw = args?["ipsw"]?.stringValue ?? "latest"
+        let osValue = (args?["os"]?.stringValue ?? "macos").lowercased()
+        guard ["macos", "linux"].contains(osValue) else {
+            return CallTool.Result(
+                content: [.text("Error: 'os' must be 'macos' or 'linux', got '\(osValue)'")],
+                isError: true
+            )
+        }
+
         let unattendedPreset = args?["unattended"]?.stringValue
         let cpuCount = args?["cpu"]?.intValue ?? 4
         let storage = args?["storage"]?.stringValue
@@ -767,16 +817,23 @@ final class LumeMCPServer {
             diskSize = 64 * 1024 * 1024 * 1024  // 64GB default
         }
 
-        // Load unattended config if specified
+        // IPSW only applies to macOS; Linux VMs use an empty disk and reject ipsw at
+        // the validation layer. unattended setup is also macOS-only.
+        let ipsw: String?
         var unattendedConfig: UnattendedConfig? = nil
-        if let preset = unattendedPreset {
-            unattendedConfig = try UnattendedConfig.load(from: preset)
+        if osValue == "macos" {
+            ipsw = args?["ipsw"]?.stringValue ?? "latest"
+            if let preset = unattendedPreset {
+                unattendedConfig = try UnattendedConfig.load(from: preset)
+            }
+        } else {
+            ipsw = nil
         }
 
         // Use async create - returns immediately
         try controller.createAsync(
             name: name,
-            os: "macos",
+            os: osValue,
             diskSize: diskSize,
             cpuCount: cpuCount,
             memorySize: memorySize,
@@ -786,9 +843,9 @@ final class LumeMCPServer {
             unattendedConfig: unattendedConfig
         )
 
-        var response = "VM '\(name)' creation started. Status: provisioning."
-        response += "\nUse lume_list_vms or lume_get_vm to monitor progress."
-        if unattendedPreset != nil {
+        var response = "VM '\(name)' creation started (os: \(osValue)). Status: provisioning."
+        response += "\nUse lume_wait_for_vm or poll lume_get_vm to track progress."
+        if unattendedConfig != nil {
             response += "\nUnattended setup will run automatically after IPSW installation."
         }
 
@@ -868,6 +925,72 @@ final class LumeMCPServer {
         let json = try JSONSerialization.data(
             withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
         return CallTool.Result(content: [.text(String(data: json, encoding: .utf8) ?? "{}")])
+    }
+
+    private func handleWaitForVM(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let name = args?["name"]?.stringValue else {
+            return CallTool.Result(content: [.text("Error: 'name' is required")], isError: true)
+        }
+        let condition = (args?["condition"]?.stringValue ?? "ssh_ready").lowercased()
+        let timeoutSec = args?["timeout_seconds"]?.intValue ?? 300
+        let storage = args?["storage"]?.stringValue
+
+        let validConditions = ["running", "stopped", "ssh_ready", "provisioning_complete"]
+        guard validConditions.contains(condition) else {
+            return CallTool.Result(
+                content: [.text("Error: 'condition' must be one of \(validConditions.joined(separator: ", ")), got '\(condition)'")],
+                isError: true
+            )
+        }
+
+        let start = Date()
+        let deadline = start.addingTimeInterval(TimeInterval(timeoutSec))
+        var lastStatus = "<unknown>"
+
+        // 1-second poll. Cheap relative to the operations being waited on (boots,
+        // shutdowns, IPSW installs); aggressive enough that agent tail latency stays
+        // under a second once the condition is met.
+        while Date() < deadline {
+            do {
+                let vm = try controller.getDetails(name: name, storage: storage)
+                lastStatus = vm.status
+                if conditionMet(condition, vm: vm) {
+                    let elapsed = Int(Date().timeIntervalSince(start))
+                    let ip = vm.ipAddress ?? "—"
+                    let ssh = (vm.sshAvailable ?? false) ? "yes" : "no"
+                    let response = "VM '\(name)' reached '\(condition)' after \(elapsed)s. status=\(vm.status) ip=\(ip) ssh=\(ssh)"
+                    return CallTool.Result(content: [.text(response)])
+                }
+            } catch {
+                // VM not yet visible (very early in provisioning) — keep polling until
+                // timeout. Don't surface the error mid-loop; the agent learns enough
+                // from the timeout message if it never resolves.
+            }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+
+        return CallTool.Result(
+            content: [.text("Timeout: VM '\(name)' did not reach '\(condition)' within \(timeoutSec)s. Last observed status: \(lastStatus).")],
+            isError: true
+        )
+    }
+
+    private func conditionMet(_ condition: String, vm: VMDetails) -> Bool {
+        switch condition {
+        case "running":
+            return vm.status == "running"
+        case "stopped":
+            return vm.status == "stopped"
+        case "ssh_ready":
+            return vm.status == "running" && (vm.sshAvailable ?? false)
+        case "provisioning_complete":
+            // Status leaves 'provisioning' AND the daemon clears the in-flight
+            // provisioning operation marker. Both because either alone has been
+            // observed to flap during the IPSW->Setup-Assistant handoff.
+            return vm.status != "provisioning" && vm.provisioningOperation == nil
+        default:
+            return false
+        }
     }
 }
 
