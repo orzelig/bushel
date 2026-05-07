@@ -13,6 +13,16 @@ See [UPSTREAM-STATUS.md](UPSTREAM-STATUS.md) for the full relationship to upstre
 
 ## Install
 
+### Tell Claude to install it
+
+If you have Claude Code, just tell it:
+
+> Install bushel from https://github.com/orzelig/bushel — read INSTALL_FOR_CLAUDE.md first.
+
+Claude will fetch [INSTALL_FOR_CLAUDE.md](INSTALL_FOR_CLAUDE.md), run the install script, and (if you're in Claude Code) wire bushel into itself via `bushel claude-setup`. Restart Claude when done and say *"Start using bushel."*
+
+### Or install it yourself
+
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/orzelig/bushel/main/scripts/install.sh)"
 ```
