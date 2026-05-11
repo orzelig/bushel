@@ -1359,7 +1359,9 @@ final class LumeMCPServer {
     /// Pure helper: produce an open_vnc envelope from a known VMDetails.
     /// Extracted from `handleOpenVNC` so error paths (and the password
     /// redaction logic) can be unit-tested without a running controller.
-    static func buildOpenVNCResult(
+    /// nonisolated so callers don't have to hop to MainActor just to read
+    /// fields off a Sendable Codable value.
+    nonisolated static func buildOpenVNCResult(
         name: String,
         vm: VMDetails,
         includePassword: Bool
@@ -1414,7 +1416,7 @@ final class LumeMCPServer {
     /// — the daemon should always hand us a well-formed vncUrl, but a bad
     /// upstream change shouldn't surface the password just because parsing
     /// failed).
-    static func redactVNCURLPassword(_ urlString: String) -> String {
+    nonisolated static func redactVNCURLPassword(_ urlString: String) -> String {
         // URLComponents doesn't accept "vnc://"; reuse the same http:// trick
         // that parseVNCEndpoint uses for the bridge side.
         let httpish = urlString.replacingOccurrences(of: "vnc://", with: "http://")
