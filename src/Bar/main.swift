@@ -17,7 +17,10 @@ import Foundation
 
 private struct Config {
     static let daemonURL = URL(string: "http://127.0.0.1:7777")!
-    static let dashboardURL = URL(string: "http://127.0.0.1:8080/")!
+    // Built-in dashboard served by the bushel daemon itself (preferred).
+    static let builtinDashboardURL = URL(string: "http://127.0.0.1:7777/")!
+    // Legacy lume-web-vm-manager fallback (separate Python service).
+    static let legacyDashboardURL = URL(string: "http://127.0.0.1:8080/")!
     static let pollInterval: TimeInterval = 5
     static let daemonLabel = "io.github.orzelig.bushel.daemon"
     static let daemonPlist = (NSHomeDirectory() as NSString)
@@ -170,17 +173,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     @objc private func openDashboard() {
-        // Probe first so we can show a friendly note if the dashboard isn't
-        // running. The dashboard ([orzelig/lume-web-vm-manager]) is a separate
-        // project; bushel-bar just deep-links to it.
+        // Prefer the built-in dashboard served by the bushel daemon itself
+        // (requires only that the daemon is running). Fall back to the
+        // legacy lume-web-vm-manager URL on port 8080 if the daemon isn't
+        // reachable but the legacy dashboard is. Show a friendly alert
+        // only if neither is up.
         Task { [weak self] in
-            let reachable = await Self.probe(url: Config.dashboardURL)
-            guard let self = self else { return }
-            if reachable {
-                NSWorkspace.shared.open(Config.dashboardURL)
-            } else {
-                self.showDashboardMissingAlertOnMain()
+            if await Self.probe(url: Config.builtinDashboardURL) {
+                await MainActor.run { NSWorkspace.shared.open(Config.builtinDashboardURL) }
+                return
             }
+            if await Self.probe(url: Config.legacyDashboardURL) {
+                await MainActor.run { NSWorkspace.shared.open(Config.legacyDashboardURL) }
+                return
+            }
+            guard let self = self else { return }
+            self.showDashboardMissingAlertOnMain()
         }
     }
 
@@ -261,13 +269,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 private func showDashboardMissingAlert() {
     let alert = NSAlert()
-    alert.messageText = "Dashboard not running"
+    alert.messageText = "Dashboard not reachable"
     alert.informativeText =
-        "The bushel web dashboard (lume-web-vm-manager) doesn't seem to be running on http://127.0.0.1:8080/.\n\n" +
-        "Install it from https://github.com/orzelig/lume-web-vm-manager and start it with:\n\n" +
-        "  python3 server.py\n\n" +
-        "Then point it at this bushel via:\n\n" +
-        "  LUME_BIN=$(which bushel) python3 server.py"
+        "Neither the built-in dashboard (http://127.0.0.1:7777/) nor the legacy lume-web-vm-manager " +
+        "fallback (http://127.0.0.1:8080/) responded.\n\n" +
+        "Start the bushel daemon with:\n\n" +
+        "  bushel serve\n\n" +
+        "or load the LaunchAgent that the installer set up. If the daemon is running and the dashboard " +
+        "still won't load, check /tmp/bushel_daemon.error.log."
     alert.alertStyle = .informational
     alert.addButton(withTitle: "OK")
     alert.runModal()

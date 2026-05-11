@@ -876,6 +876,34 @@ extension Server {
         }
     }
 
+    /// Handle GET / and GET /dashboard - Serve the built-in web dashboard HTML.
+    /// The HTML talks to the same daemon (relative URLs), so no external Python
+    /// server or LUME_DAEMON_URL configuration is needed. Replaces the
+    /// "install lume-web-vm-manager separately" friction with one curl-bash.
+    func handleDashboard() async throws -> HTTPResponse {
+        guard let url = Bundle.lumeResources.url(forResource: "dashboard", withExtension: "html"),
+              let data = try? Data(contentsOf: url)
+        else {
+            Logger.error("dashboard.html missing from resource bundle")
+            return HTTPResponse(
+                statusCode: .internalServerError,
+                headers: ["Content-Type": "text/plain; charset=utf-8"],
+                body: Data("dashboard.html missing from resource bundle".utf8)
+            )
+        }
+        return HTTPResponse(
+            statusCode: .ok,
+            headers: [
+                "Content-Type": "text/html; charset=utf-8",
+                // Disable caching: the dashboard's JS pulls /lume/vms on its own
+                // schedule, but the HTML itself can change between releases and
+                // we don't want stale UI shown after an upgrade.
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+            ],
+            body: data
+        )
+    }
+
     /// Handle GET /lume/host/status - Report host capacity and health for orchestrator
     func handleGetHostStatus() async throws -> HTTPResponse {
         do {
