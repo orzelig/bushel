@@ -900,16 +900,55 @@ extension Server {
             )
         }
 
-        // HTML-escape the name so a `</script>` in a VM name can't break out.
-        // The character set we care about is "<", ">", "&", "\"", "'" —
-        // standard HTML attribute/text contexts.
-        let escaped = name
+        // The VM name appears in two different syntactic contexts in the
+        // template, each requiring its own escape:
+        //
+        //   1. HTML text/attribute (in <title>, <span>) — escape the standard
+        //      "<>&\"'" set so a hostile name can't break out of the tag.
+        //   2. JavaScript string literal (`const VM_NAME = ...`) — HTML
+        //      escaping is WRONG here: `&amp;` would land in the JS string as
+        //      five literal characters, and the WS URL would have a `&amp;`
+        //      where the user typed `&`. JSON-encode instead; JSON's string
+        //      grammar is a superset of JS string literals (modulo U+2028 /
+        //      U+2029 which JSONEncoder happens to NOT emit unescaped on
+        //      Apple platforms, but we hardening-escape them anyway below).
+        //
+        // We use distinct placeholders for the two contexts so the template
+        // remains explicit about which substitution lands where.
+        let htmlEscaped = name
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "'", with: "&#39;")
-        let html = template.replacingOccurrences(of: "__BUSHEL_VM_NAME__", with: escaped)
+
+        // JSON-encode the name. Produces a complete quoted string literal
+        // (e.g. `"foo&bar"`), so the template embeds it directly as
+        // `const VM_NAME = __BUSHEL_VM_NAME_JSON__;` with no surrounding
+        // quotes. JSONEncoder.encode handles unicode and edge cases
+        // (control chars, lone surrogates, etc.) correctly.
+        let encoder = JSONEncoder()
+        // U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR) are valid
+        // in JSON strings but are line terminators in JS — they'd break a
+        // single-line string literal. Replace them with \u-escapes after
+        // encoding. (JSONEncoder on Apple platforms does NOT emit these
+        // unescaped today, but defending against any future encoder change.)
+        var jsonEncoded: String
+        if let jsonData = try? encoder.encode(name),
+           let raw = String(data: jsonData, encoding: .utf8) {
+            jsonEncoded = raw
+                .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+                .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+        } else {
+            // Should never happen — JSONEncoder for a String can fail only on
+            // pathological surrogate input. Fall back to an empty string
+            // literal rather than letting the page render unparseable JS.
+            jsonEncoded = "\"\""
+        }
+
+        let html = template
+            .replacingOccurrences(of: "__BUSHEL_VM_NAME_HTML__", with: htmlEscaped)
+            .replacingOccurrences(of: "__BUSHEL_VM_NAME_JSON__", with: jsonEncoded)
 
         return HTTPResponse(
             statusCode: .ok,

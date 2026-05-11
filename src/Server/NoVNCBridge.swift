@@ -86,6 +86,13 @@ final class WebSocketToTCPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let tcpChannel: any Channel
     private let vmName: String
     private var closed = false
+    // Backpressure counter: incremented whenever we forward bytes to a TCP
+    // channel that's flagged as not-writable. v1 simplification per review
+    // feedback — we log a warning at every 1000th occurrence so we get a
+    // real-world signal, but do NOT drop bytes (RFB is a stream protocol and
+    // dropping frames would corrupt the session). The proper autoRead-toggle
+    // implementation is tracked as a follow-up.
+    private var blockedWrites: UInt64 = 0
 
     init(tcpChannel: any Channel, vmName: String) {
         self.tcpChannel = tcpChannel
@@ -106,6 +113,16 @@ final class WebSocketToTCPHandler: ChannelInboundHandler, @unchecked Sendable {
             let bytes = data.readableBytesView
             var buf = tcpChannel.allocator.buffer(capacity: bytes.count)
             buf.writeBytes(bytes)
+            // TODO: proper backpressure — when tcpChannel is not writable,
+            // pause WS autoRead and resume on writability-changed. For now,
+            // count and periodically log so the metric isn't silent.
+            if !tcpChannel.isWritable {
+                blockedWrites &+= 1
+                if blockedWrites.isMultiple(of: 1000) {
+                    Logger.error("WS->TCP bridge: TCP peer not writable",
+                        metadata: ["vm": vmName, "blocked_writes": "\(blockedWrites)"])
+                }
+            }
             tcpChannel.writeAndFlush(buf, promise: nil)
 
         case .ping:
@@ -159,6 +176,9 @@ final class TCPToWebSocketHandler: ChannelInboundHandler, @unchecked Sendable {
     private let wsChannel: any Channel
     private let vmName: String
     private var closed = false
+    // Backpressure counter; see WebSocketToTCPHandler.blockedWrites for the
+    // v1-simplification rationale.
+    private var blockedWrites: UInt64 = 0
 
     init(wsChannel: any Channel, vmName: String) {
         self.wsChannel = wsChannel
@@ -172,6 +192,15 @@ final class TCPToWebSocketHandler: ChannelInboundHandler, @unchecked Sendable {
         // will mask if it's the client (it's not — we're the server) and
         // emit framing bytes.
         let frame = WebSocketFrame(fin: true, opcode: .binary, data: buffer)
+        // TODO: proper backpressure — when wsChannel is not writable, pause
+        // TCP autoRead and resume on writability-changed. v1: count + log.
+        if !wsChannel.isWritable {
+            blockedWrites &+= 1
+            if blockedWrites.isMultiple(of: 1000) {
+                Logger.error("TCP->WS bridge: WS peer not writable",
+                    metadata: ["vm": vmName, "blocked_writes": "\(blockedWrites)"])
+            }
+        }
         wsChannel.writeAndFlush(frame, promise: nil)
     }
 
@@ -216,4 +245,71 @@ func resolveVNCEndpoint(forVM name: String) throws -> VNCEndpoint {
         throw VMError.vncNotConfigured
     }
     return try parseVNCEndpoint(urlString)
+}
+
+// MARK: - Bridge connection registry
+//
+// Caps concurrent WS<->TCP bridges to protect the daemon (and the host) from
+// runaway clients. Per-VM cap stops a single misbehaving viewer from
+// exhausting connections; total cap is a fail-safe for the daemon as a whole.
+// Loopback-only deployment means the practical attacker surface is small, but
+// these limits also prevent honest bugs (tab leaks, etc.) from cascading.
+
+actor BridgeRegistry {
+    static let shared = BridgeRegistry()
+    private var perVM: [String: Int] = [:]
+    private var total: Int = 0
+    let maxPerVM: Int = 32
+    let maxTotal: Int = 128
+
+    func tryAcquire(vmName: String) -> Bool {
+        guard total < maxTotal, (perVM[vmName] ?? 0) < maxPerVM else { return false }
+        perVM[vmName, default: 0] += 1
+        total += 1
+        return true
+    }
+
+    func release(vmName: String) {
+        if let n = perVM[vmName], n > 0 {
+            perVM[vmName] = n - 1
+            if perVM[vmName] == 0 { perVM.removeValue(forKey: vmName) }
+        }
+        if total > 0 { total -= 1 }
+    }
+}
+
+// MARK: - Pure bridge wireup
+//
+// Pipeline glue for both sides of the bridge. Hoisted out of installVNCBridge
+// so EmbeddedChannel-based tests can call it directly without standing up a
+// real TCP socket / WebSocket handshake. installVNCBridge handles resolution
+// and TCP connect, then delegates to this function.
+//
+// Both channels must already be live. The function installs the per-direction
+// handlers and the close-cascade. Returns a future that completes when both
+// handlers are installed (or fails if either install fails).
+
+func wireBridge(ws: any Channel, tcp: any Channel, vmName: String) -> EventLoopFuture<Void> {
+    // Backpressure: bound the write-buffer water marks on both sides so
+    // isWritable becomes a meaningful signal. Without this, NIO's default
+    // unbounded buffer would let a slow peer's queue grow without bound.
+    // We deliberately fire-and-forget the setOption calls; they're best-effort
+    // and a non-supported channel (e.g. EmbeddedChannel in tests) shouldn't
+    // block the bridge install.
+    let waterMark = ChannelOptions.Types.WriteBufferWaterMark(low: 32_768, high: 4_194_304)
+    _ = ws.setOption(ChannelOptions.writeBufferWaterMark, value: waterMark)
+    _ = tcp.setOption(ChannelOptions.writeBufferWaterMark, value: waterMark)
+
+    let tcpHandler = TCPToWebSocketHandler(wsChannel: ws, vmName: vmName)
+    let wsHandler = WebSocketToTCPHandler(tcpChannel: tcp, vmName: vmName)
+
+    return tcp.pipeline.addHandler(tcpHandler).flatMap {
+        ws.pipeline.addHandler(wsHandler)
+    }.map {
+        // Close-cascade: closing one side closes the other so a tab close
+        // doesn't leak a TCP connection, and a guest shutdown doesn't leave
+        // a half-open WS.
+        ws.closeFuture.whenComplete { _ in tcp.close(promise: nil) }
+        tcp.closeFuture.whenComplete { _ in ws.close(promise: nil) }
+    }
 }

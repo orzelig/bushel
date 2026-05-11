@@ -466,20 +466,66 @@ final class Server: @unchecked Sendable {
                 // standard Upgrade headers are intercepted by the upgrader;
                 // everything else stays HTTP and gets dispatched through
                 // HTTPChannelHandler as before.
+                let port = self.portNumber
                 let upgrader = NIOWebSocketServerUpgrader(
+                    // 1 MiB max frame: VNC FramebufferUpdate messages can carry
+                    // a full-screen worth of pixels (default noVNC NIO setting
+                    // of 16 KiB is far too small for retina resolutions).
+                    maxFrameSize: 1 << 20,
                     shouldUpgrade: { (channel: any Channel, head: HTTPRequestHead) in
                         // Return non-nil HTTPHeaders to accept the upgrade,
-                        // or nil to reject. We accept only the exact path
-                        // /vnc/<name>/ws (and let the bridge fail later if
-                        // the VM isn't running — keeps the upgrade path
-                        // cheap and contention-free).
+                        // or nil to reject. Path → Origin → VM existence,
+                        // each cheapest-first.
+
+                        // 1. Path shape: /vnc/<name>/ws, not /vnc/static/.
                         let path = head.uri.split(separator: "?", maxSplits: 1).first.map(String.init) ?? head.uri
                         let parts = path.split(separator: "/").map(String.init)
-                        let ok = parts.count == 3 && parts[0] == "vnc" && parts[2] == "ws" && parts[1] != "static"
-                        return channel.eventLoop.makeSucceededFuture(ok ? HTTPHeaders() : nil)
+                        guard parts.count == 3, parts[0] == "vnc", parts[2] == "ws",
+                              parts[1] != "static"
+                        else {
+                            return channel.eventLoop.makeSucceededFuture(nil)
+                        }
+
+                        // 2. Origin allowlist: browsers don't enforce SOP on
+                        // WebSocket handshake, so any page can otherwise
+                        // initiate a WS to localhost:7777 and drive the user's
+                        // VM. Missing Origin is allowed (non-browser clients
+                        // like Python WS libs and command-line `wscat` don't
+                        // send one). Match case-insensitively (browsers
+                        // always send lowercase scheme/host, but be robust).
+                        if let origin = head.headers["origin"].first {
+                            let allowed: Swift.Set<String> = [
+                                "http://127.0.0.1:\(port)",
+                                "http://localhost:\(port)",
+                            ]
+                            guard allowed.contains(origin.lowercased()) else {
+                                Logger.error("Rejecting WS upgrade: Origin not in allowlist",
+                                    metadata: ["origin": origin])
+                                return channel.eventLoop.makeSucceededFuture(nil)
+                            }
+                        }
+
+                        // 3. VM existence: resolve via MainActor; reject if
+                        // the VM isn't running or doesn't have VNC configured
+                        // so the browser sees a clean 426 rather than a 101
+                        // followed by an immediate close.
+                        let vmName = NoVNCPath.extractVMName(fromWebSocketPath: head.uri) ?? ""
+                        let promise = channel.eventLoop.makePromise(of: HTTPHeaders?.self)
+                        Task { @MainActor in
+                            do {
+                                _ = try resolveVNCEndpoint(forVM: vmName)
+                                promise.succeed(HTTPHeaders())
+                            } catch {
+                                Logger.info("Rejecting WS upgrade: VM resolution failed",
+                                    metadata: ["vm": vmName, "error": error.localizedDescription])
+                                promise.succeed(nil)
+                            }
+                        }
+                        return promise.futureResult
                     },
                     upgradePipelineHandler: { (channel: any Channel, head: HTTPRequestHead) in
-                        // Path was already validated in shouldUpgrade — extract the name.
+                        // Path/Origin/VM were validated in shouldUpgrade —
+                        // extract the name and bridge.
                         let vmName = NoVNCPath.extractVMName(fromWebSocketPath: head.uri) ?? ""
                         return Server.installVNCBridge(on: channel, vmName: vmName)
                     }
@@ -570,88 +616,123 @@ final class Server: @unchecked Sendable {
     /// HTTP-to-WebSocket upgrade.
     ///
     /// The flow:
-    /// 1. Hop to MainActor to resolve the VM's VNC URL (vnc://:pw@host:port).
-    /// 2. Open an outbound TCP connection to that host:port on the same
-    ///    event loop the WebSocket channel is running on (keeps both halves
-    ///    of the proxy on the same thread — no cross-loop dispatch needed
-    ///    for the per-frame hot path).
-    /// 3. Install the per-direction handlers: WS frames → TCP bytes on the
-    ///    WS channel, TCP bytes → WS frames on the TCP channel.
-    /// 4. If resolution or TCP connect fails, send a close frame so the
-    ///    browser sees a clean disconnect rather than a hanging connection.
+    /// 1. Acquire a slot from BridgeRegistry. If the per-VM or total cap is
+    ///    saturated, send a 1013 ("Try again later") close and bail.
+    /// 2. Hop to MainActor to resolve the VM's VNC URL (vnc://:pw@host:port).
+    ///    Returns a Sendable VNCEndpoint via an EventLoopPromise — all
+    ///    pipeline / channel mutations happen on the event loop afterwards.
+    /// 3. Open an outbound TCP connection to the VNC server on the same
+    ///    event loop as the WS channel (cheap context switching for the
+    ///    per-frame copy).
+    /// 4. Delegate per-direction handler wireup to `wireBridge`, which is
+    ///    Channel-protocol-typed (works with EmbeddedChannel for tests).
+    /// 5. If anything fails, send a close frame so the browser sees a clean
+    ///    disconnect rather than a hanging connection.
     static func installVNCBridge(on wsChannel: any Channel, vmName: String) -> EventLoopFuture<Void> {
         let promise = wsChannel.eventLoop.makePromise(of: Void.self)
         let eventLoop = wsChannel.eventLoop
 
-        // Resolve VNC endpoint off the event loop (MainActor isolation).
-        Task { @MainActor in
-            do {
-                let endpoint = try resolveVNCEndpoint(forVM: vmName)
-                Logger.info("VNC bridge: VM resolved",
-                    metadata: ["vm": vmName, "host": endpoint.host, "port": "\(endpoint.port)"])
+        // Step 1: acquire a bridge slot. Reject with close-frame if saturated.
+        Task {
+            let acquired = await BridgeRegistry.shared.tryAcquire(vmName: vmName)
+            if !acquired {
+                Logger.error("VNC bridge: connection cap reached",
+                    metadata: ["vm": vmName])
+                eventLoop.execute {
+                    // 1013 — "Try again later" (per RFC 6455 / RFC 7232 §11.7
+                    // "WebSocket Close Code Number Registry"). NIO doesn't
+                    // ship a named case for it, so use .unknown(1013).
+                    sendCloseAndDrop(wsChannel: wsChannel, code: .unknown(1013))
+                }
+                promise.fail(BridgeError.tooManyConnections)
+                return
+            }
+            // Ensure we release on close regardless of which side initiates.
+            wsChannel.closeFuture.whenComplete { _ in
+                Task { await BridgeRegistry.shared.release(vmName: vmName) }
+            }
 
-                // Open TCP connection to the VM's VNC server. We use the same
-                // event-loop group so both sides land on the same loop —
-                // cheaper context switching for the per-frame copy.
-                let bootstrap = ClientBootstrap(group: eventLoop)
-                    .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-                    .channelInitializer { tcpChannel in
-                        tcpChannel.pipeline.addHandler(TCPToWebSocketHandler(
-                            wsChannel: wsChannel, vmName: vmName))
-                    }
+            // Step 2: resolve endpoint on MainActor; surface a Sendable
+            // VNCEndpoint via a promise so the rest of the work stays on the
+            // event loop. (Prior implementation mutated the pipeline from
+            // MainActor context, violating NIO's loop-affinity invariant.)
+            let endpointPromise = eventLoop.makePromise(of: VNCEndpoint.self)
+            Task { @MainActor in
+                do {
+                    let ep = try resolveVNCEndpoint(forVM: vmName)
+                    endpointPromise.succeed(ep)
+                } catch {
+                    endpointPromise.fail(error)
+                }
+            }
 
-                bootstrap.connect(host: endpoint.host, port: endpoint.port).whenComplete { result in
-                    switch result {
-                    case .success(let tcpChannel):
-                        // Now install the inbound side on the WS channel.
-                        let inbound = WebSocketToTCPHandler(
-                            tcpChannel: tcpChannel, vmName: vmName)
-                        wsChannel.pipeline.addHandler(inbound).whenComplete { addResult in
-                            switch addResult {
-                            case .success:
-                                Logger.info("VNC bridge ready", metadata: ["vm": vmName])
-                                // Close one → close the other.
-                                wsChannel.closeFuture.whenComplete { _ in
-                                    tcpChannel.close(promise: nil)
-                                }
-                                tcpChannel.closeFuture.whenComplete { _ in
-                                    wsChannel.close(promise: nil)
-                                }
-                                promise.succeed(())
+            endpointPromise.futureResult.hop(to: eventLoop).whenComplete { resolveResult in
+                switch resolveResult {
+                case .success(let endpoint):
+                    Logger.info("VNC bridge: VM resolved",
+                        metadata: ["vm": vmName, "host": endpoint.host, "port": "\(endpoint.port)"])
+
+                    // Step 3: open the TCP socket. Both sides land on the
+                    // same event loop, so per-frame forwarding is a single-
+                    // threaded handoff with no cross-loop dispatch.
+                    let bootstrap = ClientBootstrap(group: eventLoop)
+                        .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+
+                    bootstrap.connect(host: endpoint.host, port: endpoint.port)
+                        .whenComplete { connectResult in
+                            switch connectResult {
+                            case .success(let tcpChannel):
+                                // Step 4: install handlers + close-cascade.
+                                wireBridge(ws: wsChannel, tcp: tcpChannel, vmName: vmName)
+                                    .whenComplete { wireResult in
+                                        switch wireResult {
+                                        case .success:
+                                            Logger.info("VNC bridge ready",
+                                                metadata: ["vm": vmName])
+                                            promise.succeed(())
+                                        case .failure(let err):
+                                            Logger.error("VNC bridge: handler install failed",
+                                                metadata: ["vm": vmName, "error": err.localizedDescription])
+                                            tcpChannel.close(promise: nil)
+                                            sendCloseAndDrop(wsChannel: wsChannel, code: .unexpectedServerError)
+                                            promise.fail(err)
+                                        }
+                                    }
                             case .failure(let err):
-                                Logger.error("VNC bridge: failed to install WS handler",
+                                Logger.error("VNC bridge: TCP connect failed",
                                     metadata: ["vm": vmName, "error": err.localizedDescription])
-                                tcpChannel.close(promise: nil)
-                                wsChannel.close(promise: nil)
+                                sendCloseAndDrop(wsChannel: wsChannel, code: .unexpectedServerError)
                                 promise.fail(err)
                             }
                         }
-                    case .failure(let err):
-                        Logger.error("VNC bridge: TCP connect failed",
-                            metadata: ["vm": vmName, "error": err.localizedDescription])
-                        // Send a close frame so the browser sees a clean
-                        // disconnect rather than a stalled connection.
-                        let close = WebSocketFrame(
-                            fin: true, opcode: .connectionClose, data: ByteBuffer())
-                        wsChannel.writeAndFlush(close).whenComplete { _ in
-                            wsChannel.close(promise: nil)
-                        }
-                        promise.fail(err)
-                    }
+
+                case .failure(let err):
+                    // Race: VM was running at shouldUpgrade-time but has since
+                    // stopped, or some other transient failure. shouldUpgrade
+                    // already gates the common case; this is the fallback.
+                    Logger.error("VNC bridge: VM resolution failed post-upgrade",
+                        metadata: ["vm": vmName, "error": err.localizedDescription])
+                    sendCloseAndDrop(wsChannel: wsChannel, code: .unexpectedServerError)
+                    promise.fail(err)
                 }
-            } catch {
-                Logger.error("VNC bridge: VM resolution failed",
-                    metadata: ["vm": vmName, "error": error.localizedDescription])
-                eventLoop.execute {
-                    let close = WebSocketFrame(
-                        fin: true, opcode: .connectionClose, data: ByteBuffer())
-                    wsChannel.writeAndFlush(close).whenComplete { _ in
-                        wsChannel.close(promise: nil)
-                    }
-                }
-                promise.fail(error)
             }
         }
+
         return promise.futureResult
     }
+
+    /// Sends a WebSocket close frame with the given status code, then closes
+    /// the channel. Runs on the channel's event loop.
+    private static func sendCloseAndDrop(wsChannel: any Channel, code: WebSocketErrorCode) {
+        var buf = wsChannel.allocator.buffer(capacity: 2)
+        buf.write(webSocketErrorCode: code)
+        let close = WebSocketFrame(fin: true, opcode: .connectionClose, data: buf)
+        wsChannel.writeAndFlush(close).whenComplete { _ in
+            wsChannel.close(promise: nil)
+        }
+    }
+}
+
+enum BridgeError: Error {
+    case tooManyConnections
 }

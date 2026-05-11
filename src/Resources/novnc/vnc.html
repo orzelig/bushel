@@ -13,7 +13,7 @@
       VM's RFB TCP socket. There's no token auth — same loopback-only model
       as the rest of the daemon.
     -->
-    <title>bushel — __BUSHEL_VM_NAME__</title>
+    <title>bushel — __BUSHEL_VM_NAME_HTML__</title>
     <style>
         :root { color-scheme: light dark; }
         html, body { margin: 0; padding: 0; height: 100%; background: #1a1a1a; color: #e6e6e6; }
@@ -42,7 +42,7 @@
     <script type="module" crossorigin="anonymous">
         import RFB from '/vnc/static/core/rfb.js';
 
-        const VM_NAME = "__BUSHEL_VM_NAME__";
+        const VM_NAME = __BUSHEL_VM_NAME_JSON__;
         const statusEl = document.getElementById('status');
         const screenEl = document.getElementById('screen');
 
@@ -101,7 +101,7 @@
 <body>
     <div id="top_bar">
         <div>
-            <span class="name">bushel — __BUSHEL_VM_NAME__</span>
+            <span class="name">bushel — __BUSHEL_VM_NAME_HTML__</span>
             <span id="status" class="status">Loading…</span>
         </div>
         <div>
