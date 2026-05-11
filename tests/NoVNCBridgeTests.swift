@@ -439,9 +439,9 @@ func testBridgeCloseFrame() throws {
 func testBridgeRegistryPerVMCap() async {
     let registry = BridgeRegistry()
     let vm = "isolated-test-vm"
-    // `maxPerVM` is `let` on the actor — Swift treats immutable storage as
-    // nonisolated, so we can read it without `await`.
-    let cap = registry.maxPerVM
+    // Even though `maxPerVM` is `let`, Swift 6 still treats actor-stored
+    // properties as isolated unless explicitly marked `nonisolated`. Hop in.
+    let cap = await registry.maxPerVM
     for _ in 0..<cap {
         let ok = await registry.tryAcquire(vmName: vm)
         #expect(ok)
