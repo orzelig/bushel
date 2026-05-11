@@ -48,6 +48,7 @@ Capabilities that bushel ships independently of upstream lume.
 | Feature | Note |
 |---|---|
 | VM snapshots ([trycua/cua#15](https://github.com/trycua/cua/issues/15)) | `lume_snapshot_create / list / restore / delete` MCP tools, backed by lume's existing APFS clonefile-based clone (so disk.img is duplicated copy-on-write — disk usage grows only as the snapshot diverges). VM must be stopped during snapshot/restore — the Apple Virtualization.framework doesn't expose a quiesced live snapshot hook. |
+| Browser-based VNC ([trycua/cua#75](https://github.com/trycua/cua/issues/75)) | `GET /vnc/<name>` serves a vendored noVNC client and `/vnc/<name>/ws` is a WebSocket-to-TCP bridge that proxies raw RFB bytes between the browser and the VM's VNC port. New `lume_open_vnc` MCP tool returns the URL on demand. First bushel feature that adds capability beyond upstream lume rather than just fixing bugs. |
 | `bushel update` | Self-update with SHA-256 verification against the published release sidecar. |
 | `bushel claude-setup` | One-step MCP registration in Claude Desktop and Claude Code. |
 | MCP response envelope | All MCP tool returns share a stable `{ok, operation, result, message, error.code}` shape so agents can branch on `ok` and make typed retry decisions on `error.code`. |
@@ -57,7 +58,6 @@ Capabilities that bushel ships independently of upstream lume.
 Tracking these for visibility — they're known limitations that bushel hasn't tackled yet.
 
 - [trycua/cua#58](https://github.com/trycua/cua/issues/58) — Nested virtualization support
-- [trycua/cua#75](https://github.com/trycua/cua/issues/75) — NoVNC support
 - [trycua/cua#925](https://github.com/trycua/cua/issues/925) — Allow disk image resize (shrink)
 - [trycua/cua#1133](https://github.com/trycua/cua/issues/1133) — Bridge network failed in homebrew release
 

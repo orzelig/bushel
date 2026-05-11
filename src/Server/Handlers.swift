@@ -876,6 +876,118 @@ extension Server {
         }
     }
 
+    // MARK: - noVNC Viewer Handlers
+
+    /// Handle GET /vnc/:name - Serve the vendored noVNC HTML page with the
+    /// VM name substituted in. The page auto-connects to the same daemon's
+    /// /vnc/:name/ws WebSocket endpoint, which is intercepted at the
+    /// channel-pipeline level (see installVNCBridge in Server.swift).
+    func handleVNCViewer(name: String) async throws -> HTTPResponse {
+        // Same loopback-only assumption as everything else in this server.
+        // VM name has no validation here because the WS bridge re-resolves
+        // the VM via LumeController and will fail cleanly if it's bogus —
+        // saves us a second name-validation regex.
+
+        guard let url = Bundle.lumeResources.url(forResource: "novnc/vnc", withExtension: "html"),
+              let data = try? Data(contentsOf: url),
+              let template = String(data: data, encoding: .utf8)
+        else {
+            Logger.error("novnc/vnc.html missing from resource bundle")
+            return HTTPResponse(
+                statusCode: .internalServerError,
+                headers: ["Content-Type": "text/plain; charset=utf-8"],
+                body: Data("novnc/vnc.html missing from resource bundle".utf8)
+            )
+        }
+
+        // HTML-escape the name so a `</script>` in a VM name can't break out.
+        // The character set we care about is "<", ">", "&", "\"", "'" —
+        // standard HTML attribute/text contexts.
+        let escaped = name
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
+        let html = template.replacingOccurrences(of: "__BUSHEL_VM_NAME__", with: escaped)
+
+        return HTTPResponse(
+            statusCode: .ok,
+            headers: [
+                "Content-Type": "text/html; charset=utf-8",
+                // The HTML itself rarely changes, but the JS assets are
+                // vendored at a specific noVNC version and shouldn't be
+                // cached aggressively across upgrades.
+                "Cache-Control": "no-cache",
+            ],
+            body: Data(html.utf8)
+        )
+    }
+
+    /// Handle GET /vnc/static/<path> - Serve a vendored noVNC asset.
+    /// Variable-depth path; matched via prefix check in handleRequest, not
+    /// the route table. Content-Type is derived from the file extension.
+    func handleVNCStatic(assetPath: String) async -> HTTPResponse {
+        // Reject any path traversal — only allow simple relative paths.
+        // Reject empty segments, leading "/", any ".." segment.
+        guard !assetPath.isEmpty,
+              !assetPath.hasPrefix("/"),
+              !assetPath.contains("..")
+        else {
+            return HTTPResponse(statusCode: .badRequest, body: "Invalid asset path")
+        }
+
+        // SPM resource bundles preserve directory structure when you .copy()
+        // a directory. Bundle.url(forResource:) doesn't take subdirectories
+        // gracefully, so use the bundle's resourceURL directly.
+        guard let bundleURL = Bundle.lumeResources.resourceURL else {
+            return HTTPResponse(statusCode: .internalServerError, body: "Resource bundle missing")
+        }
+        let fileURL = bundleURL.appendingPathComponent("novnc").appendingPathComponent(assetPath)
+
+        // Confirm the resolved path is still inside the novnc directory —
+        // belt-and-suspenders against any path traversal we missed.
+        let novncRoot = bundleURL.appendingPathComponent("novnc").standardizedFileURL.path
+        let resolvedPath = fileURL.standardizedFileURL.path
+        guard resolvedPath.hasPrefix(novncRoot + "/") || resolvedPath == novncRoot else {
+            return HTTPResponse(statusCode: .badRequest, body: "Invalid asset path")
+        }
+
+        guard let data = try? Data(contentsOf: fileURL) else {
+            return HTTPResponse(statusCode: .notFound, body: "Not found")
+        }
+
+        let ext = (assetPath as NSString).pathExtension.lowercased()
+        let contentType: String
+        switch ext {
+        case "js", "mjs": contentType = "application/javascript; charset=utf-8"
+        case "css":       contentType = "text/css; charset=utf-8"
+        case "html":      contentType = "text/html; charset=utf-8"
+        case "json":      contentType = "application/json; charset=utf-8"
+        case "png":       contentType = "image/png"
+        case "jpg", "jpeg": contentType = "image/jpeg"
+        case "gif":       contentType = "image/gif"
+        case "svg":       contentType = "image/svg+xml"
+        case "ico":       contentType = "image/x-icon"
+        case "woff":      contentType = "font/woff"
+        case "woff2":     contentType = "font/woff2"
+        case "txt":       contentType = "text/plain; charset=utf-8"
+        default:          contentType = "application/octet-stream"
+        }
+
+        return HTTPResponse(
+            statusCode: .ok,
+            headers: [
+                "Content-Type": contentType,
+                // noVNC assets are fingerprinted by version (we bumped on
+                // each upgrade). Allow brief caching to reduce repeat
+                // fetches when a user reopens the viewer.
+                "Cache-Control": "public, max-age=300",
+            ],
+            body: data
+        )
+    }
+
     /// Handle GET / and GET /dashboard - Serve the built-in web dashboard HTML.
     /// The HTML talks to the same daemon (relative URLs), so no external Python
     /// server or LUME_DAEMON_URL configuration is needed. Replaces the

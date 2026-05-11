@@ -837,6 +837,24 @@ final class LumeMCPServer {
                     "type": .string("object"),
                     "properties": .object([:])
                 ])
+            ),
+            Tool(
+                name: "lume_open_vnc",
+                description: "Return a browser-openable URL for the VM's noVNC viewer (HTML + WebSocket bridge served by the daemon). Use this when the human needs to see the VM's screen interactively — vision agents should prefer lume_screen_capture for one-shot frames. VM must be running with VNC available.",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "name": .object([
+                            "type": .string("string"),
+                            "description": .string("Name of a running VM with VNC active")
+                        ]),
+                        "storage": .object([
+                            "type": .string("string"),
+                            "description": .string("Optional storage location name or path")
+                        ])
+                    ]),
+                    "required": .array([.string("name")])
+                ])
             )
         ]
     }
@@ -880,6 +898,8 @@ final class LumeMCPServer {
                 return try await handleGetFile(params.arguments)
             case "lume_host_status":
                 return try await handleHostStatus(params.arguments)
+            case "lume_open_vnc":
+                return try await handleOpenVNC(params.arguments)
             case "lume_wait_for_vm":
                 return try await handleWaitForVM(params.arguments)
             case "lume_snapshot_create":
@@ -1306,6 +1326,63 @@ final class LumeMCPServer {
                 "available_slots": availableSlots,
                 "version": Lume.Version.current,
             ]
+        )
+    }
+
+    /// Returns the noVNC viewer URL for a running VM. The user (or the agent
+    /// on their behalf) can `open <url>` to get a full interactive desktop
+    /// in a browser. For programmatic screen access, prefer lume_screen_capture
+    /// rather than driving the WebSocket bridge.
+    ///
+    /// We surface both the browser URL (`/vnc/<name>`) and the WebSocket URL
+    /// (`/vnc/<name>/ws`), plus the native `vnc://` URL for users who'd
+    /// rather use Screen Sharing.app or a dedicated VNC client.
+    private func handleOpenVNC(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let name = args?["name"]?.stringValue else {
+            return MCPResponse.error(
+                operation: "open_vnc",
+                code: "validation_error",
+                message: "'name' is required"
+            )
+        }
+        let storage = args?["storage"]?.stringValue
+
+        let vm = try controller.getDetails(name: name, storage: storage)
+        guard vm.status == "running" else {
+            return MCPResponse.error(
+                operation: "open_vnc",
+                code: "vnc_unavailable",
+                message: "VM '\(name)' is not running (status: \(vm.status))"
+            )
+        }
+        guard let nativeVNCURL = vm.vncUrl else {
+            return MCPResponse.error(
+                operation: "open_vnc",
+                code: "vnc_unavailable",
+                message: "VM '\(name)' has no VNC URL"
+            )
+        }
+
+        // The HTTP daemon's port. The MCP server runs in-process with the
+        // daemon's binary, but as a separate `bushel serve --mcp` invocation;
+        // it doesn't know the HTTP server's port. 7777 is the default and
+        // is honored by both the LaunchAgent installer and the dashboard.
+        // BUSHEL_DAEMON_PORT can override for non-default deployments.
+        let port = ProcessInfo.processInfo.environment["BUSHEL_DAEMON_PORT"].flatMap { UInt16($0) } ?? 7777
+
+        let encodedName = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+        let browserURL = "http://127.0.0.1:\(port)/vnc/\(encodedName)"
+        let wsURL = "ws://127.0.0.1:\(port)/vnc/\(encodedName)/ws"
+
+        return MCPResponse.success(
+            operation: "open_vnc",
+            result: [
+                "name": name,
+                "url": browserURL,
+                "ws_url": wsURL,
+                "native_vnc_url": nativeVNCURL,
+            ],
+            message: "Open \(browserURL) in a browser, or use a native VNC viewer with \(nativeVNCURL)."
         )
     }
 
