@@ -29,6 +29,8 @@ Claude will fetch [INSTALL_FOR_CLAUDE.md](INSTALL_FOR_CLAUDE.md), run the instal
 
 Installs the `bushel` binary to `~/.local/bin/bushel` and registers a LaunchAgent (`io.github.orzelig.bushel.daemon`) for `bushel serve` on `127.0.0.1:7777`. Apple Silicon only. No telemetry, no auto-update by default.
 
+A web dashboard ships built-in: with the daemon running, open <http://127.0.0.1:7777/> in a browser. Lists VMs, starts/stops them, refreshes every 5 s. No separate `pip install` or `python3 server.py` step.
+
 To upgrade: `bushel update` (or `bushel update --check-only` to just see what's available). SHA-256 is verified against the published sidecar before any files are swapped, and the daemon is stopped and restarted around the swap. A daily LaunchAgent surfaces a macOS notification when an update lands; updates never auto-apply.
 
 For a menu-bar status icon (open the dashboard, start/stop the daemon, see VM count at a glance), pass `--menubar` to `install.sh`. It registers a separate LaunchAgent (`io.github.orzelig.bushel.menubar`) that autostarts at login.

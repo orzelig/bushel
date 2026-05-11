@@ -41,7 +41,8 @@ let package = Package(
             path: "src",
             exclude: ["Bar"],
             resources: [
-                .copy("Resources/unattended-presets")
+                .copy("Resources/unattended-presets"),
+                .copy("Resources/dashboard.html")
             ]),
         .executableTarget(
             name: "bushel-bar",

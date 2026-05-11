@@ -11,6 +11,16 @@ extension Bundle {
     static let lumeResources: Bundle = {
         let bundleName = "bushel_bushel.bundle"
 
+        // 0. SPM-managed test/build context. `Bundle.module` is the auto-generated
+        //    accessor SPM emits inside this target. In the test runner, Bundle.main
+        //    points at the test executable rather than the bushel binary, so the
+        //    .resourceURL / .bundleURL checks below all miss; Bundle.module always
+        //    resolves to the actual resource bundle when we're being driven by
+        //    `swift test`.
+        if FileManager.default.fileExists(atPath: Bundle.module.bundlePath) {
+            return Bundle.module
+        }
+
         // 1. .app bundle: Contents/Resources/
         if let resourceURL = Bundle.main.resourceURL {
             let path = resourceURL.appendingPathComponent(bundleName).path
@@ -34,6 +44,6 @@ extension Bundle {
         }
         #endif
 
-        fatalError("Could not load resource bundle '\(bundleName)' from resourceURL or bundleURL")
+        fatalError("Could not load resource bundle '\(bundleName)' from Bundle.module / resourceURL / bundleURL")
     }()
 }

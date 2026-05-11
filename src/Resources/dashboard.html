@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>bushel</title>
+<style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { font: 15px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+       max-width: 1100px; margin: 0 auto; padding: 24px; background: Canvas; color: CanvasText; }
+.toolbar { display: flex; justify-content: space-between; align-items: end; margin-bottom: 24px; gap: 16px; }
+h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; }
+.sub { color: GrayText; font-size: 13px; margin: 0; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
+.vm { border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+      border-radius: 10px; padding: 16px; background: color-mix(in srgb, Canvas 96%, CanvasText 4%); }
+.vm.running { border-color: color-mix(in srgb, #2fa84f 60%, transparent); }
+.vm header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.vm h2 { margin: 0; font-size: 16px; font-weight: 600; word-break: break-all; }
+.badge { font-size: 11px; padding: 3px 8px; border-radius: 999px; text-transform: uppercase;
+        letter-spacing: 0.04em; background: color-mix(in srgb, CanvasText 12%, transparent); }
+.badge.running { background: #2fa84f; color: white; }
+dl { display: grid; grid-template-columns: 80px 1fr; gap: 4px 12px; margin: 0 0 14px; font-size: 13px; }
+dt { color: GrayText; }
+dd { margin: 0; word-break: break-all; }
+.bar { height: 6px; border-radius: 3px; background: color-mix(in srgb, CanvasText 12%, transparent); overflow: hidden; }
+.bar > span { display: block; height: 100%; background: #2fa84f; transition: width .3s; }
+small { color: GrayText; font-size: 11px; }
+footer { display: flex; gap: 6px; flex-wrap: wrap; }
+.btn { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+      border: 1px solid color-mix(in srgb, CanvasText 30%, transparent); background: Canvas;
+      color: CanvasText; text-decoration: none; display: inline-block; }
+.btn:hover { background: color-mix(in srgb, CanvasText 8%, Canvas); }
+.btn.primary { background: #007aff; border-color: #007aff; color: white; }
+.btn.primary:hover { background: #0066d6; }
+.btn.danger { color: #c0392b; border-color: color-mix(in srgb, #c0392b 50%, transparent); }
+.btn.danger:hover { background: color-mix(in srgb, #c0392b 10%, Canvas); }
+.empty { color: GrayText; text-align: center; padding: 48px;
+        border: 1px dashed color-mix(in srgb, CanvasText 20%, transparent); border-radius: 10px; }
+.flash { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; display: none; }
+.flash.show { display: block; }
+.flash.err { background: #ffe5e5; color: #8b0000; }
+.flash.ok { background: #e1f7e6; color: #1e6b34; }
+code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px;
+      padding: 1px 5px; background: color-mix(in srgb, CanvasText 10%, transparent); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <div>
+    <h1>bushel VMs</h1>
+    <p class="sub"><span id="status">Loading…</span></p>
+  </div>
+</div>
+<div id="flash" class="flash"></div>
+<div id="root">
+  <div class="empty">Loading…</div>
+</div>
+
+<script>
+// Built-in dashboard for the bushel daemon. Talks to the same daemon that
+// serves this page (relative URLs, no LUME_DAEMON_URL needed). Auto-refreshes
+// every 5s and pauses refresh while an input is focused so typing doesn't get
+// wiped by the next tick.
+const REFRESH_MS = 5000;
+let inFlight = false;
+
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  for (const k in (attrs || {})) {
+    if (k === "class") node.className = attrs[k];
+    else if (k.startsWith("on") && typeof attrs[k] === "function") node.addEventListener(k.slice(2), attrs[k]);
+    else node.setAttribute(k, attrs[k]);
+  }
+  for (const c of children) {
+    if (c == null) continue;
+    node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+  }
+  return node;
+}
+
+function fmtBytes(n) {
+  if (!n && n !== 0) return "—";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0; let v = Number(n);
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return v.toFixed(v < 10 ? 2 : 1) + " " + u[i];
+}
+
+function flash(msg, kind) {
+  const f = document.getElementById("flash");
+  f.textContent = msg;
+  f.className = "flash show " + (kind || "ok");
+  setTimeout(() => { f.className = "flash"; }, 4000);
+}
+
+async function fetchVMs() {
+  if (inFlight) return;
+  inFlight = true;
+  try {
+    const r = await fetch("/lume/vms", { headers: { Accept: "application/json" } });
+    if (!r.ok) throw new Error("daemon returned " + r.status);
+    const vms = await r.json();
+    document.getElementById("status").textContent =
+      `${vms.length} VM${vms.length === 1 ? "" : "s"} · daemon on ${location.host}`;
+    render(vms);
+  } catch (e) {
+    document.getElementById("status").textContent = "Daemon unreachable: " + e.message;
+  } finally {
+    inFlight = false;
+  }
+}
+
+function render(vms) {
+  const root = document.getElementById("root");
+  root.innerHTML = "";
+  if (!vms.length) {
+    root.appendChild(el("div", { class: "empty" },
+      "No VMs yet. Use ", el("code", null, "bushel pull"), " or ", el("code", null, "bushel create"), " from the CLI."));
+    return;
+  }
+  const grid = el("div", { class: "grid" });
+  for (const vm of vms) grid.appendChild(card(vm));
+  root.appendChild(grid);
+}
+
+function card(vm) {
+  const running = vm.status === "running";
+  const disk = vm.diskSize || {};
+  const used = disk.allocated || 0, total = disk.total || 1;
+  const pct = Math.min(100, Math.round((used / total) * 100));
+
+  const node = el("div", { class: "vm" + (running ? " running" : "") });
+  node.appendChild(el("header", null,
+    el("h2", null, vm.name),
+    el("span", { class: "badge" + (running ? " running" : "") }, vm.status || "unknown")));
+  node.appendChild(el("dl", null,
+    el("dt", null, "OS"), el("dd", null, vm.os || "—"),
+    el("dt", null, "IP"), el("dd", null, vm.ipAddress || "—"),
+    el("dt", null, "SSH"), el("dd", null, vm.sshAvailable ? "yes" : "no"),
+    el("dt", null, "CPU / RAM"), el("dd", null, `${vm.cpuCount || "?"} cores · ${fmtBytes(vm.memorySize)}`),
+    el("dt", null, "Disk"), el("dd", null,
+      el("div", { class: "bar" }, el("span", { style: `width:${pct}%` })),
+      el("small", null, `${fmtBytes(used)} / ${fmtBytes(total)} (${pct}%)`))));
+
+  const footer = el("footer", null);
+  if (running) {
+    if (vm.vncUrl) footer.appendChild(el("a", { class: "btn primary", href: vm.vncUrl }, "VNC"));
+    footer.appendChild(button("Stop", () => mutate(`/lume/vms/${encodeURIComponent(vm.name)}/stop`, "POST", `Stopped ${vm.name}`)));
+  } else {
+    footer.appendChild(button("Start", () => mutate(`/lume/vms/${encodeURIComponent(vm.name)}/run`, "POST", `Starting ${vm.name}`), "primary"));
+  }
+  footer.appendChild(button("Delete", () => {
+    if (!confirm(`Delete VM '${vm.name}'? This cannot be undone.`)) return;
+    mutate(`/lume/vms/${encodeURIComponent(vm.name)}`, "DELETE", `Deleted ${vm.name}`);
+  }, "danger"));
+  node.appendChild(footer);
+  return node;
+}
+
+function button(label, onClick, klass) {
+  return el("button", { class: "btn" + (klass ? " " + klass : ""), onclick: onClick }, label);
+}
+
+async function mutate(url, method, okMsg) {
+  try {
+    const r = await fetch(url, { method, headers: { "Content-Type": "application/json" } });
+    if (!r.ok) {
+      const text = await r.text();
+      throw new Error(text || ("HTTP " + r.status));
+    }
+    flash(okMsg, "ok");
+    setTimeout(fetchVMs, 600);
+  } catch (e) {
+    flash("Failed: " + e.message, "err");
+  }
+}
+
+// Pause refresh while user is typing in a form. (No editing UI yet, but the
+// pattern matches lume-web-vm-manager so future dialog/forms work cleanly.)
+function shouldRefresh() {
+  const t = document.activeElement;
+  if (!t) return true;
+  const tag = (t.tagName || "").toLowerCase();
+  return !(tag === "input" || tag === "textarea" || tag === "select");
+}
+
+fetchVMs();
+setInterval(() => { if (shouldRefresh()) fetchVMs(); }, REFRESH_MS);
+</script>
+</body>
+</html>

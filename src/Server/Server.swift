@@ -196,6 +196,20 @@ final class Server: @unchecked Sendable {
 
     private func setupRoutes() {
         routes = [
+            // Built-in web dashboard. Served at "/" and "/dashboard" so a fresh
+            // bushel install gives users a UI without a separate Python service.
+            Route(
+                method: "GET", path: "/",
+                handler: { [weak self] _ in
+                    guard let self else { throw HTTPError.internalError }
+                    return try await self.handleDashboard()
+                }),
+            Route(
+                method: "GET", path: "/dashboard",
+                handler: { [weak self] _ in
+                    guard let self else { throw HTTPError.internalError }
+                    return try await self.handleDashboard()
+                }),
             Route(
                 method: "GET", path: "/lume/vms",
                 handler: { [weak self] request in
