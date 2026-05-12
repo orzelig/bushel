@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <!--
+      bushel-bundled noVNC viewer (vendored from https://github.com/novnc/noVNC v1.6.0)
+      noVNC is licensed under the MPL 2.0; this wrapper page is BSD-2-Clause.
+
+      A bushel-specific thin shim over RFB. The page knows the VM name from a
+      placeholder we substitute server-side, and connects to /vnc/<name>/ws.
+      The daemon proxies binary frames between the browser WebSocket and the
+      VM's RFB TCP socket. There's no token auth — same loopback-only model
+      as the rest of the daemon.
+    -->
+    <title>bushel — __BUSHEL_VM_NAME_HTML__</title>
+    <style>
+        :root { color-scheme: light dark; }
+        html, body { margin: 0; padding: 0; height: 100%; background: #1a1a1a; color: #e6e6e6; }
+        body {
+            font: 13px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+            display: flex; flex-direction: column;
+        }
+        #top_bar {
+            background: #2a2a2a;
+            color: #e6e6e6;
+            padding: 8px 14px;
+            display: flex; align-items: center; justify-content: space-between;
+            border-bottom: 1px solid #3a3a3a;
+        }
+        #top_bar .name { font-weight: 600; }
+        #top_bar .status { color: #aaa; font-size: 12px; margin-left: 16px; }
+        #top_bar .status.error { color: #ff7b72; }
+        #top_bar .status.connected { color: #7ee787; }
+        #screen { flex: 1; overflow: hidden; background: #000; }
+        button {
+            font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 4px;
+            background: #3a3a3a; color: #e6e6e6; border: 1px solid #4a4a4a; cursor: pointer;
+        }
+        button:hover { background: #4a4a4a; }
+    </style>
+    <script type="module" crossorigin="anonymous">
+        import RFB from '/vnc/static/core/rfb.js';
+
+        const VM_NAME = __BUSHEL_VM_NAME_JSON__;
+        const statusEl = document.getElementById('status');
+        const screenEl = document.getElementById('screen');
+
+        function setStatus(text, cls) {
+            statusEl.textContent = text;
+            statusEl.className = 'status' + (cls ? ' ' + cls : '');
+        }
+
+        // The daemon serves the bridge at /vnc/<name>/ws on the same origin.
+        const url = (window.location.protocol === 'https:' ? 'wss://' : 'ws://')
+            + window.location.host
+            + '/vnc/' + encodeURIComponent(VM_NAME) + '/ws';
+
+        setStatus('Connecting…');
+
+        // noVNC will need the VNC password to complete RFB auth. We don't
+        // pre-fill it: passing `{ password: '' }` makes noVNC try the empty
+        // password immediately, the VM rejects, the TCP socket closes, and
+        // the user never gets a chance to type the real password (the WS is
+        // already dead by the time we'd prompt). Instead we let noVNC fire
+        // `credentialsrequired` and respond with the prompt in that handler
+        // (or with a value from the URL hash if the caller provided one).
+        const rfb = new RFB(screenEl, url, {});
+
+        rfb.viewOnly = false;
+        rfb.scaleViewport = true;
+        rfb.resizeSession = false;
+        rfb.background = '#000';
+
+        rfb.addEventListener('connect', () => setStatus('Connected to ' + VM_NAME, 'connected'));
+        rfb.addEventListener('disconnect', (e) => {
+            const why = (e && e.detail && e.detail.clean) ? 'Disconnected' : 'Connection lost';
+            setStatus(why, 'error');
+        });
+        rfb.addEventListener('credentialsrequired', () => {
+            // Pull the password from the URL hash (#password=...) if present —
+            // lets a generated link include it without surfacing in HTTP logs.
+            // Otherwise, prompt.
+            const hashParams = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+            const fromHash = hashParams.get('password');
+            const password = fromHash || prompt('VNC password for ' + VM_NAME + ':') || '';
+            rfb.sendCredentials({ password: password });
+        });
+        rfb.addEventListener('securityfailure', (e) => {
+            setStatus('VNC auth failed: ' + (e && e.detail && e.detail.reason || 'unknown'), 'error');
+        });
+        rfb.addEventListener('desktopname', (e) => {
+            document.title = 'bushel — ' + VM_NAME + ' (' + e.detail.name + ')';
+        });
+
+        // Provide a button to send Ctrl+Alt+Del (macOS guests rarely need it,
+        // but it's the only "trapped" key combo worth a shortcut for parity
+        // with noVNC's own UI).
+        document.getElementById('sendCAD').onclick = () => rfb.sendCtrlAltDel();
+    </script>
+</head>
+<body>
+    <div id="top_bar">
+        <div>
+            <span class="name">bushel — __BUSHEL_VM_NAME_HTML__</span>
+            <span id="status" class="status">Loading…</span>
+        </div>
+        <div>
+            <button id="sendCAD" type="button">Send Ctrl+Alt+Del</button>
+        </div>
+    </div>
+    <div id="screen"></div>
+</body>
+</html>

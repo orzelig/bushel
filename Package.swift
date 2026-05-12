@@ -35,6 +35,7 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
                 .product(name: "NIOSSH", package: "swift-nio-ssh")
             ],
@@ -42,7 +43,8 @@ let package = Package(
             exclude: ["Bar"],
             resources: [
                 .copy("Resources/unattended-presets"),
-                .copy("Resources/dashboard.html")
+                .copy("Resources/dashboard.html"),
+                .copy("Resources/novnc")
             ]),
         .executableTarget(
             name: "bushel-bar",
@@ -52,7 +54,14 @@ let package = Package(
         .testTarget(
             name: "bushelTests",
             dependencies: [
-                "bushel"
+                "bushel",
+                // EmbeddedChannel + WebSocketFrame are used to unit-test
+                // NoVNCBridge.wireBridge without spinning up a real socket.
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio"),
+                // For pattern-matching CallTool.Result.content in tests.
+                .product(name: "MCP", package: "swift-sdk"),
             ],
             path: "tests")
     ]

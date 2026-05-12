@@ -837,6 +837,28 @@ final class LumeMCPServer {
                     "type": .string("object"),
                     "properties": .object([:])
                 ])
+            ),
+            Tool(
+                name: "lume_open_vnc",
+                description: "Return a browser-openable URL for the VM's noVNC viewer (HTML + WebSocket bridge served by the daemon). Use this when the human needs to see the VM's screen interactively — vision agents should prefer lume_screen_capture for one-shot frames. VM must be running with VNC available. The `native_vnc_url` returned is redacted (password stripped) by default; set `include_password: true` to receive the full `vnc://:password@host:port` form. Note: `include_password: true` may surface the cleartext VNC password in MCP transport logs — set it only when the caller is trusted to handle that.",
+                inputSchema: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "name": .object([
+                            "type": .string("string"),
+                            "description": .string("Name of a running VM with VNC active")
+                        ]),
+                        "storage": .object([
+                            "type": .string("string"),
+                            "description": .string("Optional storage location name or path")
+                        ]),
+                        "include_password": .object([
+                            "type": .string("boolean"),
+                            "description": .string("If true, return the unredacted `vnc://:password@host:port` URL. Defaults to false. The password may end up in MCP transport logs; only enable in trusted contexts.")
+                        ])
+                    ]),
+                    "required": .array([.string("name")])
+                ])
             )
         ]
     }
@@ -880,6 +902,8 @@ final class LumeMCPServer {
                 return try await handleGetFile(params.arguments)
             case "lume_host_status":
                 return try await handleHostStatus(params.arguments)
+            case "lume_open_vnc":
+                return try await handleOpenVNC(params.arguments)
             case "lume_wait_for_vm":
                 return try await handleWaitForVM(params.arguments)
             case "lume_snapshot_create":
@@ -1307,6 +1331,100 @@ final class LumeMCPServer {
                 "version": Lume.Version.current,
             ]
         )
+    }
+
+    /// Returns the noVNC viewer URL for a running VM. The user (or the agent
+    /// on their behalf) can `open <url>` to get a full interactive desktop
+    /// in a browser. For programmatic screen access, prefer lume_screen_capture
+    /// rather than driving the WebSocket bridge.
+    ///
+    /// We surface both the browser URL (`/vnc/<name>`) and the WebSocket URL
+    /// (`/vnc/<name>/ws`), plus the native `vnc://` URL for users who'd
+    /// rather use Screen Sharing.app or a dedicated VNC client.
+    private func handleOpenVNC(_ args: [String: Value]?) async throws -> CallTool.Result {
+        guard let name = args?["name"]?.stringValue else {
+            return MCPResponse.error(
+                operation: "open_vnc",
+                code: "validation_error",
+                message: "'name' is required"
+            )
+        }
+        let storage = args?["storage"]?.stringValue
+        let includePassword = args?["include_password"]?.boolValue ?? false
+
+        let vm = try controller.getDetails(name: name, storage: storage)
+        return Self.buildOpenVNCResult(name: name, vm: vm, includePassword: includePassword)
+    }
+
+    /// Pure helper: produce an open_vnc envelope from a known VMDetails.
+    /// Extracted from `handleOpenVNC` so error paths (and the password
+    /// redaction logic) can be unit-tested without a running controller.
+    /// nonisolated so callers don't have to hop to MainActor just to read
+    /// fields off a Sendable Codable value.
+    nonisolated static func buildOpenVNCResult(
+        name: String,
+        vm: VMDetails,
+        includePassword: Bool
+    ) -> CallTool.Result {
+        guard vm.status == "running" else {
+            return MCPResponse.error(
+                operation: "open_vnc",
+                code: "vnc_unavailable",
+                message: "VM '\(name)' is not running (status: \(vm.status))"
+            )
+        }
+        guard let nativeVNCURL = vm.vncUrl else {
+            return MCPResponse.error(
+                operation: "open_vnc",
+                code: "vnc_unavailable",
+                message: "VM '\(name)' has no VNC URL"
+            )
+        }
+
+        // The HTTP daemon's port. The MCP server runs in-process with the
+        // daemon's binary, but as a separate `bushel serve --mcp` invocation;
+        // it doesn't know the HTTP server's port. 7777 is the default and
+        // is honored by both the LaunchAgent installer and the dashboard.
+        // BUSHEL_DAEMON_PORT can override for non-default deployments.
+        let port = ProcessInfo.processInfo.environment["BUSHEL_DAEMON_PORT"].flatMap { UInt16($0) } ?? 7777
+
+        let encodedName = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+        let browserURL = "http://127.0.0.1:\(port)/vnc/\(encodedName)"
+        let wsURL = "ws://127.0.0.1:\(port)/vnc/\(encodedName)/ws"
+
+        // Redact the userinfo (`:password@`) from native_vnc_url by default.
+        // The cleartext password may otherwise land in MCP transport logs.
+        // Callers that need the full URL can opt in via include_password.
+        let nativeVNCResponseURL = includePassword
+            ? nativeVNCURL
+            : redactVNCURLPassword(nativeVNCURL)
+
+        return MCPResponse.success(
+            operation: "open_vnc",
+            result: [
+                "name": name,
+                "url": browserURL,
+                "ws_url": wsURL,
+                "native_vnc_url": nativeVNCResponseURL,
+            ],
+            message: "Open \(browserURL) in a browser, or use a native VNC viewer with \(nativeVNCResponseURL)."
+        )
+    }
+
+    /// Strip the `:password@` userinfo from a `vnc://[user]:[password]@host:port`
+    /// URL. Returns the input unchanged if it doesn't parse as a URL (defensive
+    /// — the daemon should always hand us a well-formed vncUrl, but a bad
+    /// upstream change shouldn't surface the password just because parsing
+    /// failed).
+    nonisolated static func redactVNCURLPassword(_ urlString: String) -> String {
+        // URLComponents doesn't accept "vnc://"; reuse the same http:// trick
+        // that parseVNCEndpoint uses for the bridge side.
+        let httpish = urlString.replacingOccurrences(of: "vnc://", with: "http://")
+        guard var comps = URLComponents(string: httpish) else { return urlString }
+        comps.user = nil
+        comps.password = nil
+        guard let redactedHttpish = comps.string else { return urlString }
+        return redactedHttpish.replacingOccurrences(of: "http://", with: "vnc://")
     }
 
     private func handleWaitForVM(_ args: [String: Value]?) async throws -> CallTool.Result {

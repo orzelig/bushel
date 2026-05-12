@@ -876,6 +876,157 @@ extension Server {
         }
     }
 
+    // MARK: - noVNC Viewer Handlers
+
+    /// Handle GET /vnc/:name - Serve the vendored noVNC HTML page with the
+    /// VM name substituted in. The page auto-connects to the same daemon's
+    /// /vnc/:name/ws WebSocket endpoint, which is intercepted at the
+    /// channel-pipeline level (see installVNCBridge in Server.swift).
+    func handleVNCViewer(name: String) async throws -> HTTPResponse {
+        // Same loopback-only assumption as everything else in this server.
+        // VM name has no validation here because the WS bridge re-resolves
+        // the VM via LumeController and will fail cleanly if it's bogus —
+        // saves us a second name-validation regex.
+
+        guard let url = Bundle.lumeResources.url(forResource: "novnc/vnc", withExtension: "html"),
+              let data = try? Data(contentsOf: url),
+              let template = String(data: data, encoding: .utf8)
+        else {
+            Logger.error("novnc/vnc.html missing from resource bundle")
+            return HTTPResponse(
+                statusCode: .internalServerError,
+                headers: ["Content-Type": "text/plain; charset=utf-8"],
+                body: Data("novnc/vnc.html missing from resource bundle".utf8)
+            )
+        }
+
+        // The VM name appears in two different syntactic contexts in the
+        // template, each requiring its own escape:
+        //
+        //   1. HTML text/attribute (in <title>, <span>) — escape the standard
+        //      "<>&\"'" set so a hostile name can't break out of the tag.
+        //   2. JavaScript string literal (`const VM_NAME = ...`) — HTML
+        //      escaping is WRONG here: `&amp;` would land in the JS string as
+        //      five literal characters, and the WS URL would have a `&amp;`
+        //      where the user typed `&`. JSON-encode instead; JSON's string
+        //      grammar is a superset of JS string literals (modulo U+2028 /
+        //      U+2029 which JSONEncoder happens to NOT emit unescaped on
+        //      Apple platforms, but we hardening-escape them anyway below).
+        //
+        // We use distinct placeholders for the two contexts so the template
+        // remains explicit about which substitution lands where.
+        let htmlEscaped = name
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
+
+        // JSON-encode the name. Produces a complete quoted string literal
+        // (e.g. `"foo&bar"`), so the template embeds it directly as
+        // `const VM_NAME = __BUSHEL_VM_NAME_JSON__;` with no surrounding
+        // quotes. JSONEncoder.encode handles unicode and edge cases
+        // (control chars, lone surrogates, etc.) correctly.
+        let encoder = JSONEncoder()
+        // U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR) are valid
+        // in JSON strings but are line terminators in JS — they'd break a
+        // single-line string literal. Replace them with \u-escapes after
+        // encoding. (JSONEncoder on Apple platforms does NOT emit these
+        // unescaped today, but defending against any future encoder change.)
+        var jsonEncoded: String
+        if let jsonData = try? encoder.encode(name),
+           let raw = String(data: jsonData, encoding: .utf8) {
+            jsonEncoded = raw
+                .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+                .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+        } else {
+            // Should never happen — JSONEncoder for a String can fail only on
+            // pathological surrogate input. Fall back to an empty string
+            // literal rather than letting the page render unparseable JS.
+            jsonEncoded = "\"\""
+        }
+
+        let html = template
+            .replacingOccurrences(of: "__BUSHEL_VM_NAME_HTML__", with: htmlEscaped)
+            .replacingOccurrences(of: "__BUSHEL_VM_NAME_JSON__", with: jsonEncoded)
+
+        return HTTPResponse(
+            statusCode: .ok,
+            headers: [
+                "Content-Type": "text/html; charset=utf-8",
+                // The HTML itself rarely changes, but the JS assets are
+                // vendored at a specific noVNC version and shouldn't be
+                // cached aggressively across upgrades.
+                "Cache-Control": "no-cache",
+            ],
+            body: Data(html.utf8)
+        )
+    }
+
+    /// Handle GET /vnc/static/<path> - Serve a vendored noVNC asset.
+    /// Variable-depth path; matched via prefix check in handleRequest, not
+    /// the route table. Content-Type is derived from the file extension.
+    func handleVNCStatic(assetPath: String) async -> HTTPResponse {
+        // Reject any path traversal — only allow simple relative paths.
+        // Reject empty segments, leading "/", any ".." segment.
+        guard !assetPath.isEmpty,
+              !assetPath.hasPrefix("/"),
+              !assetPath.contains("..")
+        else {
+            return HTTPResponse(statusCode: .badRequest, body: "Invalid asset path")
+        }
+
+        // SPM resource bundles preserve directory structure when you .copy()
+        // a directory. Bundle.url(forResource:) doesn't take subdirectories
+        // gracefully, so use the bundle's resourceURL directly.
+        guard let bundleURL = Bundle.lumeResources.resourceURL else {
+            return HTTPResponse(statusCode: .internalServerError, body: "Resource bundle missing")
+        }
+        let fileURL = bundleURL.appendingPathComponent("novnc").appendingPathComponent(assetPath)
+
+        // Confirm the resolved path is still inside the novnc directory —
+        // belt-and-suspenders against any path traversal we missed.
+        let novncRoot = bundleURL.appendingPathComponent("novnc").standardizedFileURL.path
+        let resolvedPath = fileURL.standardizedFileURL.path
+        guard resolvedPath.hasPrefix(novncRoot + "/") || resolvedPath == novncRoot else {
+            return HTTPResponse(statusCode: .badRequest, body: "Invalid asset path")
+        }
+
+        guard let data = try? Data(contentsOf: fileURL) else {
+            return HTTPResponse(statusCode: .notFound, body: "Not found")
+        }
+
+        let ext = (assetPath as NSString).pathExtension.lowercased()
+        let contentType: String
+        switch ext {
+        case "js", "mjs": contentType = "application/javascript; charset=utf-8"
+        case "css":       contentType = "text/css; charset=utf-8"
+        case "html":      contentType = "text/html; charset=utf-8"
+        case "json":      contentType = "application/json; charset=utf-8"
+        case "png":       contentType = "image/png"
+        case "jpg", "jpeg": contentType = "image/jpeg"
+        case "gif":       contentType = "image/gif"
+        case "svg":       contentType = "image/svg+xml"
+        case "ico":       contentType = "image/x-icon"
+        case "woff":      contentType = "font/woff"
+        case "woff2":     contentType = "font/woff2"
+        case "txt":       contentType = "text/plain; charset=utf-8"
+        default:          contentType = "application/octet-stream"
+        }
+
+        return HTTPResponse(
+            statusCode: .ok,
+            headers: [
+                "Content-Type": contentType,
+                // noVNC assets are fingerprinted by version (we bumped on
+                // each upgrade). Allow brief caching to reduce repeat
+                // fetches when a user reopens the viewer.
+                "Cache-Control": "public, max-age=300",
+            ],
+            body: data
+        )
+    }
+
     /// Handle GET / and GET /dashboard - Serve the built-in web dashboard HTML.
     /// The HTML talks to the same daemon (relative URLs), so no external Python
     /// server or LUME_DAEMON_URL configuration is needed. Replaces the
