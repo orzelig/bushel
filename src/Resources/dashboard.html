@@ -148,7 +148,18 @@ function card(vm) {
   if (running) {
     // Browser-based noVNC viewer (served by this same daemon). Opens in a
     // new tab so the dashboard stays usable while watching the VM's screen.
-    footer.appendChild(el("a", { class: "btn primary", href: `/vnc/${encodeURIComponent(vm.name)}`, target: "_blank", rel: "noopener" }, "Open VNC"));
+    // Pull the VNC password out of vncUrl (`vnc://:PASSWORD@host:port`) and
+    // pass it to /vnc/<name> via URL fragment. Fragments are never sent to
+    // the server, so this only travels client-side; vnc.html's
+    // credentialsrequired handler picks it up from window.location.hash and
+    // skips the prompt() that would otherwise pop up. Safe because the
+    // password is already in this same /lume/vms response.
+    let vncHref = `/vnc/${encodeURIComponent(vm.name)}`;
+    if (vm.vncUrl) {
+      const m = vm.vncUrl.match(/^vnc:\/\/:([^@]*)@/);
+      if (m && m[1]) vncHref += `#password=${encodeURIComponent(m[1])}`;
+    }
+    footer.appendChild(el("a", { class: "btn primary", href: vncHref, target: "_blank", rel: "noopener" }, "Open VNC"));
     if (vm.vncUrl) footer.appendChild(el("a", { class: "btn", href: vm.vncUrl, title: "Open in native VNC viewer (Screen Sharing.app on macOS)" }, "vnc://"));
     footer.appendChild(button("Stop", () => mutate(`/lume/vms/${encodeURIComponent(vm.name)}/stop`, "POST", `Stopped ${vm.name}`)));
   } else {
