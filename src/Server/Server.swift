@@ -545,6 +545,22 @@ final class Server: @unchecked Sendable {
                         // that buffered byte arrives before our callback gets
                         // a chance to clean up the pipeline.
                         let vmName = NoVNCPath.extractVMName(fromWebSocketPath: head.uri) ?? ""
+
+                        // 5. Subprotocol negotiation. noVNC's RFB client sends
+                        // `Sec-WebSocket-Protocol: binary` in its handshake;
+                        // when the server doesn't echo a matching value back
+                        // in the 101 response, browsers fail the handshake
+                        // with code 1006 / 1005 and noVNC reports "Connection
+                        // closed". We accept "binary" (the only protocol we
+                        // need to support today — RFB is a pure byte stream).
+                        // If the client sent multiple proposals, echo the
+                        // first match; otherwise omit the header entirely
+                        // (RFC 6455: server may omit if it doesn't pick one,
+                        // and curl / python / wscat all send no subprotocol).
+                        let requestedProtocols = head.headers["sec-websocket-protocol"]
+                            .flatMap { $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
+                        let chosenProtocol: String? = requestedProtocols.contains("binary") ? "binary" : nil
+
                         let promise = channel.eventLoop.makePromise(of: HTTPHeaders?.self)
                         Task { @MainActor in
                             do {
@@ -555,7 +571,13 @@ final class Server: @unchecked Sendable {
                                     do {
                                         try channel.pipeline.syncOperations
                                             .removeHandler(name: Server.httpAppHandlerName)
-                                        promise.succeed(HTTPHeaders())
+                                        var responseHeaders = HTTPHeaders()
+                                        if let chosenProtocol = chosenProtocol {
+                                            responseHeaders.add(
+                                                name: "Sec-WebSocket-Protocol",
+                                                value: chosenProtocol)
+                                        }
+                                        promise.succeed(responseHeaders)
                                     } catch {
                                         Logger.error(
                                             "Rejecting WS upgrade: cannot remove HTTPChannelHandler",

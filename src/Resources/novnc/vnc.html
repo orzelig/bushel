@@ -58,13 +58,14 @@
 
         setStatus('Connecting…');
 
-        // noVNC will need the VNC password to complete RFB auth. We don't ship
-        // it through the HTML (the daemon could leak it via 'lume_open_vnc' if
-        // the caller wants), so for now we prompt the user. The VM's password
-        // is whatever lume picked when starting the VM — surfaced in vncUrl.
-        const rfb = new RFB(screenEl, url, {
-            credentials: { password: '' },
-        });
+        // noVNC will need the VNC password to complete RFB auth. We don't
+        // pre-fill it: passing `{ password: '' }` makes noVNC try the empty
+        // password immediately, the VM rejects, the TCP socket closes, and
+        // the user never gets a chance to type the real password (the WS is
+        // already dead by the time we'd prompt). Instead we let noVNC fire
+        // `credentialsrequired` and respond with the prompt in that handler
+        // (or with a value from the URL hash if the caller provided one).
+        const rfb = new RFB(screenEl, url, {});
 
         rfb.viewOnly = false;
         rfb.scaleViewport = true;
