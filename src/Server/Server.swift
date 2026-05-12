@@ -23,7 +23,16 @@ enum PortError: Error, LocalizedError {
 /// already handles Content-Length / chunked-encoding reassembly), then
 /// dispatches the complete request to the Server's route handlers.
 private final class HTTPChannelHandler: ChannelInboundHandler, @unchecked Sendable {
-    typealias InboundIn = HTTPServerRequestPart
+    // InboundIn is declared as `Any` rather than HTTPServerRequestPart so that
+    // unwrapInboundIn doesn't force-cast. After a successful WebSocket upgrade
+    // this handler may still be in the pipeline while the WS frame decoder is
+    // added by NIO at position .last (i.e. *after* this handler in inbound
+    // order), and the first buffered WS frame can arrive as raw IOData before
+    // we get a chance to remove the handler. With InboundIn = HTTPServerRequestPart
+    // that cast hit fatalError("tried to decode as type HTTPPart…"). With
+    // InboundIn = Any we get Any, do a safe `as?` cast, and pass through any
+    // non-HTTP data to the next handler.
+    typealias InboundIn = Any
     typealias OutboundOut = HTTPServerResponsePart
 
     private var requestHead: HTTPRequestHead?
@@ -35,7 +44,13 @@ private final class HTTPChannelHandler: ChannelInboundHandler, @unchecked Sendab
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        switch unwrapInboundIn(data) {
+        guard let part = unwrapInboundIn(data) as? HTTPServerRequestPart else {
+            // Not HTTP — most likely a WS frame after upgrade. Forward unchanged
+            // to the next handler (the WS bridge), which knows what to do with it.
+            context.fireChannelRead(data)
+            return
+        }
+        switch part {
         case .head(let head):
             requestHead = head
             bodyBuffer.clear()
@@ -125,6 +140,12 @@ private final class HTTPChannelHandler: ChannelInboundHandler, @unchecked Sendab
 // MARK: - Server Class
 
 final class Server: @unchecked Sendable {
+
+    /// Pipeline name for the custom HTTPChannelHandler. Referenced when the
+    /// WebSocket upgrader needs to remove this handler before installing the
+    /// VNC bridge — otherwise the post-upgrade WS frames hit
+    /// HTTPChannelHandler's HTTPServerRequestPart force-cast and crash.
+    static let httpAppHandlerName = "bushel.http_app_handler"
 
     // MARK: - Route Type
 
@@ -509,12 +530,39 @@ final class Server: @unchecked Sendable {
                         // the VM isn't running or doesn't have VNC configured
                         // so the browser sees a clean 426 rather than a 101
                         // followed by an immediate close.
+                        //
+                        // 4. CRITICAL: remove HTTPChannelHandler from the
+                        // pipeline before the upgrade completes. NIO adds the
+                        // WS frame decoder at `.last` during upgrade, which
+                        // ends up *after* HTTPChannelHandler — so the first
+                        // post-upgrade WS frame reaches HTTPChannelHandler as
+                        // raw IOData and crashes its force-cast to
+                        // HTTPServerRequestPart. Doing this here (during
+                        // shouldUpgrade) instead of in upgradePipelineHandler
+                        // is essential: HTTPServerProtocolUpgradeHandler
+                        // buffers exactly one read between shouldUpgrade
+                        // returning and upgradePipelineHandler running, and
+                        // that buffered byte arrives before our callback gets
+                        // a chance to clean up the pipeline.
                         let vmName = NoVNCPath.extractVMName(fromWebSocketPath: head.uri) ?? ""
                         let promise = channel.eventLoop.makePromise(of: HTTPHeaders?.self)
                         Task { @MainActor in
                             do {
                                 _ = try resolveVNCEndpoint(forVM: vmName)
-                                promise.succeed(HTTPHeaders())
+                                // Hop back to the event loop for the
+                                // synchronous pipeline operation.
+                                channel.eventLoop.execute {
+                                    do {
+                                        try channel.pipeline.syncOperations
+                                            .removeHandler(name: Server.httpAppHandlerName)
+                                        promise.succeed(HTTPHeaders())
+                                    } catch {
+                                        Logger.error(
+                                            "Rejecting WS upgrade: cannot remove HTTPChannelHandler",
+                                            metadata: ["error": String(describing: error)])
+                                        promise.succeed(nil)
+                                    }
+                                }
                             } catch {
                                 Logger.info("Rejecting WS upgrade: VM resolution failed",
                                     metadata: ["vm": vmName, "error": error.localizedDescription])
@@ -524,8 +572,9 @@ final class Server: @unchecked Sendable {
                         return promise.futureResult
                     },
                     upgradePipelineHandler: { (channel: any Channel, head: HTTPRequestHead) in
-                        // Path/Origin/VM were validated in shouldUpgrade —
-                        // extract the name and bridge.
+                        // HTTPChannelHandler was already removed in shouldUpgrade
+                        // (see the comment there for why this can't be deferred
+                        // until here). All we do is install the bridge.
                         let vmName = NoVNCPath.extractVMName(fromWebSocketPath: head.uri) ?? ""
                         return Server.installVNCBridge(on: channel, vmName: vmName)
                     }
@@ -534,11 +583,12 @@ final class Server: @unchecked Sendable {
                 return channel.pipeline.configureHTTPServerPipeline(
                     withServerUpgrade: (upgraders: [upgrader], completionHandler: { _ in })
                 ).flatMap {
-                    // Add the regular HTTP request handler. On a successful
-                    // WebSocket upgrade NIO removes HTTPServerRequestDecoder
-                    // /Encoder from the pipeline, so this handler stops
-                    // seeing data — which is exactly what we want.
-                    channel.pipeline.addHandler(HTTPChannelHandler(server: srv))
+                    // Name the HTTP app handler so the WS upgrade path can
+                    // remove it before bridging (see comment above).
+                    channel.pipeline.addHandler(
+                        HTTPChannelHandler(server: srv),
+                        name: Server.httpAppHandlerName
+                    )
                 }
             }
 
