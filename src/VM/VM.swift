@@ -123,6 +123,11 @@ class VM {
         // Check if SSH is available (only if we have an IP)
         let sshAvailable: Bool? = ipAddress != nil ? NetworkUtils.isSSHAvailable(ipAddress: ipAddress!) : nil
 
+        // Load metadata sidecar (empty if missing) so callers that go through
+        // `vm.details` (rather than the lightweight VMDirectory.getDetails)
+        // also see the user-edited creator/description/owner fields.
+        let metadata = VMMetadataStore.load(from: vmDirContext.dir)
+
         return VMDetails(
             name: vmDirContext.name,
             os: getOSType(),
@@ -135,7 +140,8 @@ class VM {
             ipAddress: ipAddress,
             sshAvailable: sshAvailable,
             locationName: vmDirContext.storage ?? "home",
-            networkMode: vmDirContext.config.networkMode.description
+            networkMode: vmDirContext.config.networkMode.description,
+            metadata: metadata
         )
     }
 

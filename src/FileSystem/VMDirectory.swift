@@ -318,6 +318,11 @@ extension VMDirectory {
             return nil
         }
 
+        // Load the metadata sidecar (creator / description / owner). Missing
+        // sidecar yields an empty VMMetadata — no separate code path needed
+        // for VMs that pre-date this feature.
+        let metadata = VMMetadataStore.load(from: self)
+
         return VMDetails(
             name: name,
             os: config.os,
@@ -333,7 +338,8 @@ extension VMDirectory {
             locationName: locationName,
             sharedDirectories: nil,
             networkMode: config.networkMode.description,
-            downloadProgress: downloadProgress
+            downloadProgress: downloadProgress,
+            metadata: metadata
         )
     }
 }

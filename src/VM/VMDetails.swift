@@ -47,11 +47,17 @@ struct VMDetails: Codable {
     let networkMode: String?
     /// Pull progress percentage (0–100) when status is "pulling", nil otherwise
     let downloadProgress: Double?
+    /// User-editable metadata (creator/description/owner) loaded from the
+    /// VM's `bushel-metadata.json` sidecar. Always encoded — even when every
+    /// inner field is nil — so clients can rely on the key being present.
+    /// Embedded inline here (rather than fetched separately) so the dashboard
+    /// avoids an N+1 GET per VM.
+    let metadata: VMMetadata
 
     enum CodingKeys: String, CodingKey {
         case name, os, cpuCount, memorySize, diskSize, display, status
         case provisioningOperation, vncUrl, ipAddress, sshAvailable, locationName, sharedDirectories
-        case networkMode, downloadProgress
+        case networkMode, downloadProgress, metadata
     }
 
     init(
@@ -69,7 +75,8 @@ struct VMDetails: Codable {
         locationName: String,
         sharedDirectories: [SharedDirectory]? = nil,
         networkMode: String? = nil,
-        downloadProgress: Double? = nil
+        downloadProgress: Double? = nil,
+        metadata: VMMetadata = VMMetadata()
     ) {
         self.name = name
         self.os = os
@@ -86,6 +93,7 @@ struct VMDetails: Codable {
         self.sharedDirectories = sharedDirectories
         self.networkMode = networkMode
         self.downloadProgress = downloadProgress
+        self.metadata = metadata
     }
 
     // Custom encoder to always include optional fields (even when nil)
@@ -106,5 +114,6 @@ struct VMDetails: Codable {
         try container.encode(sharedDirectories, forKey: .sharedDirectories)
         try container.encode(networkMode, forKey: .networkMode)
         try container.encode(downloadProgress, forKey: .downloadProgress)
+        try container.encode(metadata, forKey: .metadata)
     }
 }

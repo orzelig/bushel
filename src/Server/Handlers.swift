@@ -231,6 +231,107 @@ extension Server {
         }
     }
 
+    // MARK: - VM Metadata Handlers
+    //
+    // Per-VM user-editable metadata (creator / description / owner) lives in
+    // a sidecar JSON file `bushel-metadata.json` inside the VM's directory.
+    // See `VMMetadataStore` for the storage details. These handlers expose
+    // the sidecar over HTTP so the dashboard's Edit dialog can read and
+    // write it.
+
+    /// GET /lume/vms/:name/metadata
+    /// Returns the sidecar JSON. Returns `{}` when the VM has no sidecar.
+    /// Returns 404 if the named VM doesn't exist in any storage location.
+    func handleGetMetadata(name: String, storage: String?) async throws -> HTTPResponse {
+        do {
+            let vmController = LumeController()
+
+            // Resolve the actual storage location so the metadata read goes
+            // to the right place when the VM lives in a non-default location.
+            // validateVMExists throws VMError.notFound — we surface that as a
+            // clean 404 rather than the default 400.
+            let actualLocation: String?
+            do {
+                actualLocation = try vmController.validateVMExists(name, storage: storage)
+            } catch VMError.notFound {
+                return HTTPResponse(
+                    statusCode: .notFound,
+                    headers: ["Content-Type": "application/json"],
+                    body: try JSONEncoder().encode(APIError(message: "VM not found: \(name)"))
+                )
+            }
+
+            let store = VMMetadataStore(home: vmController.home)
+            let metadata = store.load(name: name, storage: actualLocation)
+            return try HTTPResponse.json(metadata)
+        } catch {
+            return .badRequest(message: error.localizedDescription)
+        }
+    }
+
+    /// PUT /lume/vms/:name/metadata
+    /// Replaces the sidecar with the supplied JSON. Unknown fields are
+    /// rejected (400) so a typo'd field name surfaces immediately. The
+    /// `updated_at` field in the body is silently ignored — the server
+    /// stamps it on every write.
+    /// Returns the metadata as actually persisted (i.e. with the server-set
+    /// `updated_at`).
+    func handlePutMetadata(name: String, storage: String?, body: Data?) async throws -> HTTPResponse {
+        guard let body = body else {
+            return HTTPResponse(
+                statusCode: .badRequest,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONEncoder().encode(
+                    APIError(message: "Request body is required"))
+            )
+        }
+
+        // Parse the body. We decode into VMMetadata directly; an unexpected
+        // type (e.g. `creator: 42`) makes JSONDecoder throw, which we surface
+        // as a 400 with a useful message rather than a generic 500.
+        let decoded: VMMetadata
+        do {
+            decoded = try JSONDecoder().decode(VMMetadata.self, from: body)
+        } catch {
+            return HTTPResponse(
+                statusCode: .badRequest,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONEncoder().encode(
+                    APIError(message: "Invalid metadata JSON: \(error.localizedDescription)"))
+            )
+        }
+
+        let vmController = LumeController()
+
+        // 404 when the VM doesn't exist. The store would otherwise happily
+        // create a sidecar in an empty/non-existent dir, which is not what
+        // we want — the issue says "validates VM exists".
+        let actualLocation: String?
+        do {
+            actualLocation = try vmController.validateVMExists(name, storage: storage)
+        } catch VMError.notFound {
+            return HTTPResponse(
+                statusCode: .notFound,
+                headers: ["Content-Type": "application/json"],
+                body: try JSONEncoder().encode(APIError(message: "VM not found: \(name)"))
+            )
+        }
+
+        // Strip any client-supplied updated_at; the store re-stamps it
+        // anyway, but doing it here too makes the contract obvious to
+        // anyone reading this code.
+        var toWrite = decoded
+        toWrite.updatedAt = nil
+
+        do {
+            let store = VMMetadataStore(home: vmController.home)
+            let written = try store.save(toWrite, name: name, storage: actualLocation)
+            return try HTTPResponse.json(written)
+        } catch {
+            return .badRequest(message: error.localizedDescription)
+        }
+    }
+
     // MARK: - VM Operation Handlers
 
     func handleSetVM(name: String, body: Data?) async throws -> HTTPResponse {

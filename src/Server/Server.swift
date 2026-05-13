@@ -284,6 +284,31 @@ final class Server: @unchecked Sendable {
                     return try await self.handleSetVM(name: name, body: request.body)
                 }),
             Route(
+                method: "GET", path: "/lume/vms/:name/metadata",
+                handler: { [weak self] request in
+                    guard let self else { throw HTTPError.internalError }
+                    let params = self.extractPathParams(
+                        pattern: "/lume/vms/:name/metadata", from: request)
+                    guard let name = params["name"] else {
+                        return HTTPResponse(statusCode: .badRequest, body: "Missing VM name")
+                    }
+                    let storage = self.extractQueryParam(request: request, name: "storage")
+                    return try await self.handleGetMetadata(name: name, storage: storage)
+                }),
+            Route(
+                method: "PUT", path: "/lume/vms/:name/metadata",
+                handler: { [weak self] request in
+                    guard let self else { throw HTTPError.internalError }
+                    let params = self.extractPathParams(
+                        pattern: "/lume/vms/:name/metadata", from: request)
+                    guard let name = params["name"] else {
+                        return HTTPResponse(statusCode: .badRequest, body: "Missing VM name")
+                    }
+                    let storage = self.extractQueryParam(request: request, name: "storage")
+                    return try await self.handlePutMetadata(
+                        name: name, storage: storage, body: request.body)
+                }),
+            Route(
                 method: "POST", path: "/lume/vms/:name/run",
                 handler: { [weak self] request in
                     guard let self else { throw HTTPError.internalError }
