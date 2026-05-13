@@ -44,6 +44,26 @@ footer { display: flex; gap: 6px; flex-wrap: wrap; }
 .flash.ok { background: #e1f7e6; color: #1e6b34; }
 code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px;
       padding: 1px 5px; background: color-mix(in srgb, CanvasText 10%, transparent); border-radius: 3px; }
+.meta { display: grid; grid-template-columns: 60px 1fr; gap: 2px 10px;
+       font-size: 12px; color: GrayText; margin: 0 0 12px; }
+.meta dt { color: GrayText; }
+.meta dd { margin: 0; color: CanvasText; word-break: break-word; overflow: hidden;
+          text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical; }
+dialog { border: 1px solid color-mix(in srgb, CanvasText 30%, transparent);
+        border-radius: 10px; padding: 0; background: Canvas; color: CanvasText;
+        max-width: 480px; width: 90%; }
+dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
+dialog form { padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+dialog h3 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
+dialog label { display: flex; flex-direction: column; gap: 4px; font-size: 13px;
+              color: GrayText; }
+dialog input[type="text"], dialog textarea { font: inherit; padding: 8px 10px;
+       border-radius: 6px;
+       border: 1px solid color-mix(in srgb, CanvasText 30%, transparent);
+       background: Canvas; color: CanvasText; }
+dialog textarea { resize: vertical; min-height: 60px; font-family: inherit; }
+dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -57,6 +77,31 @@ code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px;
 <div id="root">
   <div class="empty">Loading…</div>
 </div>
+
+<!--
+  Edit-metadata dialog. One dialog re-used across all VM cards so we don't
+  build/tear down DOM on every edit click. The current VM name is stashed
+  in dataset.vmName at open-time; the form submit handler reads it back.
+-->
+<dialog id="metadata-dialog">
+  <form id="metadata-form" method="dialog">
+    <h3>Edit metadata</h3>
+    <small id="metadata-vm-name"></small>
+    <label>Creator
+      <input type="text" id="metadata-creator" autocomplete="off" maxlength="200">
+    </label>
+    <label>Description
+      <textarea id="metadata-description" rows="3" maxlength="2000"></textarea>
+    </label>
+    <label>Owner
+      <input type="text" id="metadata-owner" autocomplete="off" maxlength="200">
+    </label>
+    <div class="row">
+      <button type="button" class="btn" id="metadata-cancel">Cancel</button>
+      <button type="submit" class="btn primary" id="metadata-save">Save</button>
+    </div>
+  </form>
+</dialog>
 
 <script>
 // Built-in dashboard for the bushel daemon. Talks to the same daemon that
@@ -144,6 +189,28 @@ function card(vm) {
       el("div", { class: "bar" }, el("span", { style: `width:${pct}%` })),
       el("small", null, `${fmtBytes(used)} / ${fmtBytes(total)} (${pct}%)`))));
 
+  // Optional metadata block (creator / owner / description). Only render rows
+  // that have a value, so VMs with no metadata don't grow a header-shaped
+  // empty space. Description gets truncated by CSS (-webkit-line-clamp) with
+  // the full text in title= for hover, matching the design.
+  const meta = (vm.metadata || {});
+  const metaRows = [];
+  if (meta.creator) {
+    metaRows.push(el("dt", null, "Creator"));
+    metaRows.push(el("dd", null, meta.creator));
+  }
+  if (meta.owner) {
+    metaRows.push(el("dt", null, "Owner"));
+    metaRows.push(el("dd", null, meta.owner));
+  }
+  if (meta.description) {
+    metaRows.push(el("dt", null, "Notes"));
+    metaRows.push(el("dd", { title: meta.description }, meta.description));
+  }
+  if (metaRows.length) {
+    node.appendChild(el("dl", { class: "meta" }, ...metaRows));
+  }
+
   const footer = el("footer", null);
   if (running) {
     // Browser-based noVNC viewer (served by this same daemon). Opens in a
@@ -165,6 +232,7 @@ function card(vm) {
   } else {
     footer.appendChild(button("Start", () => mutate(`/lume/vms/${encodeURIComponent(vm.name)}/run`, "POST", `Starting ${vm.name}`), "primary"));
   }
+  footer.appendChild(button("Edit", () => openMetadataDialog(vm)));
   footer.appendChild(button("Delete", () => {
     if (!confirm(`Delete VM '${vm.name}'? This cannot be undone.`)) return;
     mutate(`/lume/vms/${encodeURIComponent(vm.name)}`, "DELETE", `Deleted ${vm.name}`);
@@ -172,6 +240,63 @@ function card(vm) {
   node.appendChild(footer);
   return node;
 }
+
+// Open the Edit-metadata dialog, prefilled with the current VM's metadata.
+// One dialog is re-used across all cards; the VM name is stashed in
+// dataset.vmName so the submit handler knows where to PUT. The form is
+// :focused on opening so the existing "pause refresh while input focused"
+// wiring kicks in.
+function openMetadataDialog(vm) {
+  const dialog = document.getElementById("metadata-dialog");
+  const meta = vm.metadata || {};
+  dialog.dataset.vmName = vm.name;
+  document.getElementById("metadata-vm-name").textContent = vm.name;
+  document.getElementById("metadata-creator").value = meta.creator || "";
+  document.getElementById("metadata-description").value = meta.description || "";
+  document.getElementById("metadata-owner").value = meta.owner || "";
+  dialog.showModal();
+  // Focus the first field after the dialog renders so refresh pauses.
+  setTimeout(() => document.getElementById("metadata-creator").focus(), 0);
+}
+
+async function saveMetadata(ev) {
+  ev.preventDefault();
+  const dialog = document.getElementById("metadata-dialog");
+  const name = dialog.dataset.vmName;
+  if (!name) return;
+
+  // Only send non-empty fields — empty inputs become `null` on the wire so
+  // the server's optional fields stay optional, matching what a fresh VM
+  // with no sidecar looks like. JSONDecoder treats missing-keys and null
+  // the same here (both decode to nil).
+  const body = {
+    creator: document.getElementById("metadata-creator").value.trim() || null,
+    description: document.getElementById("metadata-description").value.trim() || null,
+    owner: document.getElementById("metadata-owner").value.trim() || null,
+  };
+
+  try {
+    const r = await fetch(`/lume/vms/${encodeURIComponent(name)}/metadata`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const text = await r.text();
+      throw new Error(text || ("HTTP " + r.status));
+    }
+    dialog.close();
+    flash(`Metadata saved for ${name}`, "ok");
+    fetchVMs();
+  } catch (e) {
+    flash("Failed: " + e.message, "err");
+  }
+}
+
+document.getElementById("metadata-form").addEventListener("submit", saveMetadata);
+document.getElementById("metadata-cancel").addEventListener("click", () => {
+  document.getElementById("metadata-dialog").close();
+});
 
 function button(label, onClick, klass) {
   return el("button", { class: "btn" + (klass ? " " + klass : ""), onclick: onClick }, label);
@@ -191,9 +316,14 @@ async function mutate(url, method, okMsg) {
   }
 }
 
-// Pause refresh while user is typing in a form. (No editing UI yet, but the
-// pattern matches lume-web-vm-manager so future dialog/forms work cleanly.)
+// Pause refresh while user is typing in a form or has the Edit dialog open.
+// Without the dialog check, the dialog stays open visually but a refresh tick
+// would still rebuild the cards underneath and the next focus shift could
+// drop the user back into a stale UI. Matches the lume-web-vm-manager
+// behaviour so future dialog/forms work cleanly.
 function shouldRefresh() {
+  const dialog = document.getElementById("metadata-dialog");
+  if (dialog && dialog.open) return false;
   const t = document.activeElement;
   if (!t) return true;
   const tag = (t.tagName || "").toLowerCase();
