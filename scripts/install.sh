@@ -206,6 +206,54 @@ install_artifacts() {
   fi
 }
 
+# Defense-in-depth (issue #20). VZVirtualMachine refuses to instantiate
+# without 'com.apple.security.virtualization' on the host process. CI signs
+# the released binary; this re-checks after extract and re-signs if missing
+# (covers older releases, local-tarball installs, future CI regressions).
+ensure_entitlement() {
+  local bin="$INSTALL_DIR/$BINARY_NAME"
+  if [ ! -x /usr/bin/codesign ]; then
+    fail "/usr/bin/codesign not found — cannot verify Virtualization entitlement.
+This is a system tool that ships with macOS; its absence indicates a broken install."
+  fi
+
+  if /usr/bin/codesign --display --entitlements - "$bin" 2>&1 \
+       | grep -q "com\.apple\.security\.virtualization"; then
+    ok "Virtualization entitlement: ${BOLD}already present${NORMAL} (signed by release)."
+    return 0
+  fi
+
+  warn "Virtualization entitlement missing on $bin; re-signing ad-hoc."
+  local ent
+  ent=$(mktemp -t bushel-entitlements).plist
+  # POSIX-portable cleanup; install.sh runs under 'set -eu' so we don't trap.
+  cat > "$ent" <<'PLIST_EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.virtualization</key>
+    <true/>
+    <key>com.apple.security.hypervisor</key>
+    <true/>
+</dict>
+</plist>
+PLIST_EOF
+
+  if ! /usr/bin/codesign --force --sign - --entitlements "$ent" "$bin" 2>&1; then
+    rm -f "$ent"
+    fail "codesign failed on $bin — VMs will not start without the entitlement."
+  fi
+  rm -f "$ent"
+
+  if /usr/bin/codesign --display --entitlements - "$bin" 2>&1 \
+       | grep -q "com\.apple\.security\.virtualization"; then
+    ok "Virtualization entitlement: ${BOLD}re-signed${NORMAL}."
+  else
+    fail "Re-sign reported success but entitlement still missing on $bin."
+  fi
+}
+
 path_advice() {
   case ":$PATH:" in *":$INSTALL_DIR:"*) return 0 ;; esac
   local sh; sh=$(basename "${SHELL:-bash}")
@@ -467,6 +515,7 @@ main() {
   preflight
   download_release
   install_artifacts
+  ensure_entitlement
   install_launch_agent
   install_update_check_agent
   install_menubar_app
