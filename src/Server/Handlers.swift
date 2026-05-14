@@ -550,7 +550,15 @@ extension Server {
                 diskPath: request.diskPath.map { Path($0) },
                 nvramPath: request.nvramPath.map { Path($0) },
                 networkMode: networkMode,
-                clipboard: request.clipboard ?? false
+                // Default ON when the request body omits clipboard. The
+                // dashboard's Start button (and the MCP lume_start_vm tool
+                // unless the caller explicitly sets false) both go through
+                // this path. ClipboardWatcher tolerates SSH-not-yet-ready
+                // (it polls and retries), so default-on is safe even for
+                // slow-booting Linux guests — it just doesn't sync until
+                // the VM is reachable. Callers who don't want host<->guest
+                // clipboard mirroring pass `clipboard: false` explicitly.
+                clipboard: request.clipboard ?? true
             )
             Logger.info("VM start initiated in background", metadata: ["name": name])
 
