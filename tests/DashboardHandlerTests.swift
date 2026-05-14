@@ -26,6 +26,30 @@ func testDashboardResourceBundled() throws {
     #expect(html.contains("/lume/vms"))
 }
 
+@Test("dashboard.html contains the parity-feature buttons")
+func testDashboardHasParityButtons() throws {
+    // Buttons added in the dashboard-parity PR. Smoke-checks that the
+    // toolbar/footer wiring didn't regress — the actual click behaviour
+    // is JS-driven and not unit-testable from Swift.
+    let url = Bundle.lumeResources.url(forResource: "dashboard", withExtension: "html")
+    let html = String(data: try Data(contentsOf: url!), encoding: .utf8) ?? ""
+    #expect(html.contains("+ Create VM"), "Create VM toolbar button missing")
+    #expect(html.contains("Edit settings"), "Edit-settings card button missing")
+    #expect(html.contains("Clone"), "Clone card button missing")
+    #expect(html.contains("Copy SSH"), "Copy SSH card button missing")
+}
+
+@Test("dashboard.html contains the parity-feature dialog IDs")
+func testDashboardHasParityDialogIDs() throws {
+    // The three new <dialog> elements wired in the dashboard-parity PR.
+    // The metadata dialog from #18 keeps its own id (metadata-dialog).
+    let url = Bundle.lumeResources.url(forResource: "dashboard", withExtension: "html")
+    let html = String(data: try Data(contentsOf: url!), encoding: .utf8) ?? ""
+    #expect(html.contains("id=\"dlg-create\""), "dlg-create dialog missing")
+    #expect(html.contains("id=\"dlg-edit\""), "dlg-edit dialog missing")
+    #expect(html.contains("id=\"dlg-clone\""), "dlg-clone dialog missing")
+}
+
 @MainActor
 @Test("handleDashboard returns 200 with HTML content type and a non-empty body")
 func testDashboardHandlerReturnsHTML() async throws {
