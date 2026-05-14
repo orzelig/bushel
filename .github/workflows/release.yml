@@ -25,6 +25,47 @@ jobs:
       - name: Build (release)
         run: swift build -c release
 
+      - name: Embed Virtualization entitlement
+        # VZVirtualMachine refuses to instantiate without the
+        # 'com.apple.security.virtualization' entitlement on the host process.
+        # The Swift toolchain ad-hoc / linker-signs the binary but does not
+        # attach entitlements; we have to do that here. See issue #20.
+        # 'com.apple.security.hypervisor' is included for nested / Rosetta
+        # support and is a strict superset of virt for our purposes.
+        # Ad-hoc signing (--sign -) works without an Apple Developer account.
+        run: |
+          set -euo pipefail
+          if [ ! -x /usr/bin/codesign ]; then
+            echo "::error::/usr/bin/codesign is missing on this runner"
+            exit 1
+          fi
+          BIN=.build/arm64-apple-macosx/release/bushel
+          ENT=$(mktemp -t bushel-entitlements).plist
+          cat > "$ENT" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>com.apple.security.virtualization</key>
+              <true/>
+              <key>com.apple.security.hypervisor</key>
+              <true/>
+          </dict>
+          </plist>
+          PLIST
+          /usr/bin/codesign --force --sign - --entitlements "$ENT" "$BIN"
+          # Verify: the entitlements must be readable from the binary now.
+          /usr/bin/codesign --display --entitlements - "$BIN" 2>&1 | tee /tmp/entitlements.out
+          grep -q com.apple.security.virtualization /tmp/entitlements.out || {
+            echo "::error::com.apple.security.virtualization not present after codesign"
+            exit 1
+          }
+          grep -q com.apple.security.hypervisor /tmp/entitlements.out || {
+            echo "::error::com.apple.security.hypervisor not present after codesign"
+            exit 1
+          }
+          rm -f "$ENT"
+
       - name: Stage tarball contents
         run: |
           set -euo pipefail

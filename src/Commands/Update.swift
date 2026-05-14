@@ -148,6 +148,12 @@ struct Update: AsyncParsableCommand {
                 try? FileManager.default.removeItem(at: bundleURL)
                 try FileManager.default.copyItem(at: newBundle, to: bundleURL)
             }
+
+            // Defense-in-depth (issue #20): catches users upgrading from
+            // unsigned builds and any future CI signing regression. Best
+            // effort — we log on failure rather than bailing mid-swap so
+            // the daemon still gets restarted.
+            Update.ensureEntitlement(binaryPath: installURL)
         } catch {
             // Best effort: bring the daemon back up even if the swap was partial.
             if daemonWasLoaded {
@@ -265,6 +271,109 @@ struct Update: AsyncParsableCommand {
             throw UpdateError.commandFailed("\(tool) exited \(process.terminationStatus): \(output.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
         return output
+    }
+
+    // MARK: - Entitlement verification (issue #20)
+
+    /// Plist content embedded into the binary as the entitlement set.
+    /// Duplicated in `.github/workflows/release.yml` and `scripts/install.sh`;
+    /// the file is six lines and effectively a constant — keeping it inline
+    /// per file is simpler than introducing a shared resource.
+    static let entitlementsPlist: String = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>com.apple.security.virtualization</key>
+            <true/>
+            <key>com.apple.security.hypervisor</key>
+            <true/>
+        </dict>
+        </plist>
+        """
+
+    /// After a binary swap, verify the new binary carries the Virtualization
+    /// entitlement; if not, ad-hoc re-sign it with the required keys.
+    ///
+    /// This is best-effort: failures are logged, not thrown. `bushel update`
+    /// has already swapped the binary on disk by the time this runs, so
+    /// bailing here would leave the user in a worse state than just noting
+    /// the problem and letting them re-sign manually (the install.sh path
+    /// will pick up the same logic on the next install).
+    @discardableResult
+    static func ensureEntitlement(binaryPath: URL) -> Bool {
+        let codesignURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        guard FileManager.default.isExecutableFile(atPath: codesignURL.path) else {
+            print("warning: /usr/bin/codesign not available; skipping entitlement check.")
+            print("         If '\(binaryPath.lastPathComponent) run' fails with a 'com.apple.security.virtualization'")
+            print("         error, re-sign manually — see issue #20 for the recipe.")
+            return false
+        }
+
+        if hasVirtualizationEntitlement(at: binaryPath, codesign: codesignURL) {
+            print("Entitlement: already present on \(binaryPath.path).")
+            return true
+        }
+
+        print("Entitlement missing on \(binaryPath.path); re-signing ad-hoc.")
+        let plistURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("bushel-entitlements-\(UUID().uuidString).plist")
+        defer { try? FileManager.default.removeItem(at: plistURL) }
+
+        do {
+            try entitlementsPlist.write(to: plistURL, atomically: true, encoding: .utf8)
+        } catch {
+            print("warning: failed to write entitlements plist (\(error)); skipping resign.")
+            return false
+        }
+
+        let sign = Process()
+        sign.executableURL = codesignURL
+        sign.arguments = ["--force", "--sign", "-", "--entitlements", plistURL.path, binaryPath.path]
+        let signOut = Pipe()
+        sign.standardOutput = signOut
+        sign.standardError = signOut
+        do {
+            try sign.run()
+        } catch {
+            print("warning: codesign failed to launch (\(error)); skipping resign.")
+            return false
+        }
+        sign.waitUntilExit()
+        if sign.terminationStatus != 0 {
+            let body = String(data: signOut.fileHandleForReading.readDataToEndOfFile(),
+                              encoding: .utf8) ?? ""
+            print("warning: codesign exited \(sign.terminationStatus): \(body.trimmingCharacters(in: .whitespacesAndNewlines))")
+            return false
+        }
+
+        if hasVirtualizationEntitlement(at: binaryPath, codesign: codesignURL) {
+            print("Entitlement: re-signed \(binaryPath.path).")
+            return true
+        }
+        print("warning: re-sign succeeded but entitlement still missing on \(binaryPath.path).")
+        return false
+    }
+
+    /// Run `codesign --display --entitlements -` and look for the
+    /// 'com.apple.security.virtualization' key in the combined output.
+    /// Returns false on any process failure (treated as "not present").
+    private static func hasVirtualizationEntitlement(at binary: URL, codesign: URL) -> Bool {
+        let process = Process()
+        process.executableURL = codesign
+        process.arguments = ["--display", "--entitlements", "-", binary.path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+        } catch {
+            return false
+        }
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8) else { return false }
+        return text.contains("com.apple.security.virtualization")
     }
 }
 
