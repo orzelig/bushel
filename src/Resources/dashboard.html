@@ -16,16 +16,19 @@ h1 { margin: 0 0 4px; font-size: 22px; font-weight: 600; }
 .vm { border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
       border-radius: 10px; padding: 16px; background: color-mix(in srgb, Canvas 96%, CanvasText 4%); }
 .vm.running { border-color: color-mix(in srgb, #2fa84f 60%, transparent); }
+.vm.pulling { border-color: color-mix(in srgb, #007aff 60%, transparent); }
 .vm header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .vm h2 { margin: 0; font-size: 16px; font-weight: 600; word-break: break-all; }
 .badge { font-size: 11px; padding: 3px 8px; border-radius: 999px; text-transform: uppercase;
         letter-spacing: 0.04em; background: color-mix(in srgb, CanvasText 12%, transparent); }
 .badge.running { background: #2fa84f; color: white; }
+.badge.pulling { background: #007aff; color: white; }
 dl { display: grid; grid-template-columns: 80px 1fr; gap: 4px 12px; margin: 0 0 14px; font-size: 13px; }
 dt { color: GrayText; }
 dd { margin: 0; word-break: break-all; }
 .bar { height: 6px; border-radius: 3px; background: color-mix(in srgb, CanvasText 12%, transparent); overflow: hidden; }
 .bar > span { display: block; height: 100%; background: #2fa84f; transition: width .3s; }
+.bar.pull > span { background: #007aff; }
 small { color: GrayText; font-size: 11px; }
 footer { display: flex; gap: 6px; flex-wrap: wrap; }
 .btn { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 6px; cursor: pointer;
@@ -58,12 +61,20 @@ dialog form { padding: 20px; display: flex; flex-direction: column; gap: 12px; }
 dialog h3 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
 dialog label { display: flex; flex-direction: column; gap: 4px; font-size: 13px;
               color: GrayText; }
-dialog input[type="text"], dialog textarea { font: inherit; padding: 8px 10px;
+dialog input[type="text"], dialog input[type="number"], dialog textarea, dialog select { font: inherit; padding: 8px 10px;
        border-radius: 6px;
        border: 1px solid color-mix(in srgb, CanvasText 30%, transparent);
        background: Canvas; color: CanvasText; }
 dialog textarea { resize: vertical; min-height: 60px; font-family: inherit; }
 dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+dialog .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+       margin-bottom: 4px; }
+.tabs button { font: inherit; font-size: 13px; padding: 8px 14px; background: transparent;
+              border: none; border-bottom: 2px solid transparent; color: GrayText; cursor: pointer; }
+.tabs button.active { color: CanvasText; border-bottom-color: #007aff; }
+.tab-panel { display: none; flex-direction: column; gap: 12px; }
+.tab-panel.active { display: flex; }
 </style>
 </head>
 <body>
@@ -71,6 +82,9 @@ dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8p
   <div>
     <h1>bushel VMs</h1>
     <p class="sub"><span id="status">Loading…</span></p>
+  </div>
+  <div>
+    <button type="button" class="btn primary" id="create-vm-btn">+ Create VM</button>
   </div>
 </div>
 <div id="flash" class="flash"></div>
@@ -103,13 +117,177 @@ dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8p
   </form>
 </dialog>
 
+<!--
+  Edit-settings dialog. PATCH /lume/vms/:name. Only fields the user actually
+  touched are sent — fields are tracked via dataset.touched on input. Disk
+  is grow-only (min = current allocated).
+-->
+<dialog id="dlg-edit">
+  <form id="edit-form" method="dialog">
+    <h3>Edit settings</h3>
+    <small id="edit-vm-name"></small>
+    <div class="grid2">
+      <label>CPU cores
+        <input type="number" id="edit-cpu" min="1" max="64" step="1" autocomplete="off">
+      </label>
+      <label>Memory
+        <input type="text" id="edit-memory" placeholder="8GB" autocomplete="off">
+      </label>
+    </div>
+    <label>Disk size <small>(grow only)</small>
+      <input type="text" id="edit-disk" placeholder="40GB" autocomplete="off">
+    </label>
+    <label>Display
+      <select id="edit-display">
+        <option value="">(unchanged)</option>
+        <option value="1024x768">1024x768</option>
+        <option value="1280x800">1280x800</option>
+        <option value="1440x900">1440x900</option>
+        <option value="1920x1080">1920x1080</option>
+        <option value="2560x1440">2560x1440</option>
+      </select>
+    </label>
+    <div class="row">
+      <button type="button" class="btn" data-close-dialog="dlg-edit">Cancel</button>
+      <button type="submit" class="btn primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<!--
+  Clone dialog. POST /lume/vms/clone. Source name is pre-filled & read-only
+  since the user clicked Clone on a specific card.
+-->
+<dialog id="dlg-clone">
+  <form id="clone-form" method="dialog">
+    <h3>Clone VM</h3>
+    <label>Source
+      <input type="text" id="clone-source" readonly>
+    </label>
+    <label>New name
+      <input type="text" id="clone-new-name" required autocomplete="off" pattern="[A-Za-z0-9._-]+">
+    </label>
+    <div class="grid2">
+      <label>Source storage <small>(optional)</small>
+        <input type="text" id="clone-source-location" autocomplete="off">
+      </label>
+      <label>Dest storage <small>(optional)</small>
+        <input type="text" id="clone-dest-location" autocomplete="off">
+      </label>
+    </div>
+    <div class="row">
+      <button type="button" class="btn" data-close-dialog="dlg-clone">Cancel</button>
+      <button type="submit" class="btn primary">Clone</button>
+    </div>
+  </form>
+</dialog>
+
+<!--
+  Create-VM dialog. Three tabs swap the form body: empty Linux, pull-image,
+  macOS-IPSW. Each tab has its own submit handler driven by data-active-tab.
+-->
+<dialog id="dlg-create">
+  <form id="create-form" method="dialog">
+    <h3>Create VM</h3>
+    <div class="tabs" role="tablist">
+      <button type="button" class="active" data-tab="linux">Empty Linux</button>
+      <button type="button" data-tab="pull">Pull image</button>
+      <button type="button" data-tab="macos">macOS (IPSW)</button>
+    </div>
+
+    <div class="tab-panel active" data-tab-panel="linux">
+      <label>Name
+        <input type="text" id="create-linux-name" autocomplete="off" pattern="[A-Za-z0-9._-]+">
+      </label>
+      <div class="grid2">
+        <label>CPU cores
+          <input type="number" id="create-linux-cpu" value="4" min="1" max="64" step="1">
+        </label>
+        <label>Memory
+          <input type="text" id="create-linux-memory" value="4GB">
+        </label>
+      </div>
+      <label>Disk size
+        <input type="text" id="create-linux-disk" value="20GB">
+      </label>
+    </div>
+
+    <div class="tab-panel" data-tab-panel="pull">
+      <label>Name
+        <input type="text" id="create-pull-name" autocomplete="off" pattern="[A-Za-z0-9._-]+">
+      </label>
+      <label>Image
+        <input type="text" id="create-pull-image" list="pull-image-suggestions" autocomplete="off" placeholder="macos-sequoia-vanilla:latest">
+        <datalist id="pull-image-suggestions">
+          <option value="macos-sequoia-vanilla:latest">
+          <option value="macos-sequoia-vanilla-sparse:latest">
+          <option value="ubuntu-noble-vanilla:latest">
+          <option value="ubuntu-noble-vanilla-sparse:latest">
+        </datalist>
+      </label>
+      <div class="grid2">
+        <label>Registry
+          <input type="text" id="create-pull-registry" value="ghcr.io">
+        </label>
+        <label>Organization
+          <input type="text" id="create-pull-organization" value="trycua">
+        </label>
+      </div>
+    </div>
+
+    <div class="tab-panel" data-tab-panel="macos">
+      <label>Name
+        <input type="text" id="create-macos-name" autocomplete="off" pattern="[A-Za-z0-9._-]+">
+      </label>
+      <div class="grid2">
+        <label>CPU cores
+          <input type="number" id="create-macos-cpu" value="4" min="1" max="64" step="1">
+        </label>
+        <label>Memory
+          <input type="text" id="create-macos-memory" value="8GB">
+        </label>
+      </div>
+      <label>Disk size
+        <input type="text" id="create-macos-disk" value="64GB">
+      </label>
+      <label>IPSW source
+        <select id="create-macos-ipsw-source">
+          <option value="latest">latest</option>
+          <option value="custom">Custom path…</option>
+        </select>
+      </label>
+      <label id="create-macos-ipsw-custom-wrap" style="display:none">IPSW path
+        <input type="text" id="create-macos-ipsw-custom" autocomplete="off">
+      </label>
+      <label>Unattended preset
+        <select id="create-macos-unattended">
+          <option value="none">none</option>
+          <option value="tahoe">tahoe</option>
+          <option value="sequoia">sequoia</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="row">
+      <button type="button" class="btn" data-close-dialog="dlg-create">Cancel</button>
+      <button type="submit" class="btn primary">Create</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
 // Built-in dashboard for the bushel daemon. Talks to the same daemon that
 // serves this page (relative URLs, no LUME_DAEMON_URL needed). Auto-refreshes
 // every 5s and pauses refresh while an input is focused so typing doesn't get
 // wiped by the next tick.
 const REFRESH_MS = 5000;
+const PULL_POLL_MS = 2000;
 let inFlight = false;
+
+// Names whose pull was kicked off from this page. We poll /lume/vms/:name
+// for each (handleGetVM consults the PullProgressTracker and returns a
+// synthetic {status:"pulling", downloadProgress} body until completion).
+const activePulls = new Map(); // name -> { progress: 0..1, state: "pulling"|"complete"|"error", error? }
 
 function el(tag, attrs, ...children) {
   const node = document.createElement(tag);
@@ -133,6 +311,18 @@ function fmtBytes(n) {
   return v.toFixed(v < 10 ? 2 : 1) + " " + u[i];
 }
 
+// Render a UInt64 byte count back into a "8GB"-style string suitable for
+// the SetVMRequest body. parseSize on the server treats values without a
+// suffix as bytes, but the dashboard's edit form shows GB strings so the
+// user sees what they're editing.
+function bytesToSizeString(n) {
+  if (!n && n !== 0) return "";
+  const gb = Number(n) / (1024 * 1024 * 1024);
+  if (gb >= 1) return Math.round(gb * 100) / 100 + "GB";
+  const mb = Number(n) / (1024 * 1024);
+  return Math.round(mb) + "MB";
+}
+
 function flash(msg, kind) {
   const f = document.getElementById("flash");
   f.textContent = msg;
@@ -149,7 +339,23 @@ async function fetchVMs() {
     const vms = await r.json();
     document.getElementById("status").textContent =
       `${vms.length} VM${vms.length === 1 ? "" : "s"} · daemon on ${location.host}`;
-    render(vms);
+    // Merge in synthetic cards for active pulls that aren't yet in the list
+    // (the VM directory doesn't exist on disk until the pull completes a
+    // bit of work — handleListVMs sees nothing, but handleGetVM is happy).
+    const known = new Set(vms.map(v => v.name));
+    const merged = [...vms];
+    for (const [name, p] of activePulls) {
+      if (known.has(name)) continue;
+      if (p.state === "complete" || p.state === "error") continue;
+      merged.push({
+        name,
+        status: "pulling",
+        os: "—",
+        downloadProgress: p.progress,
+        _synthetic: true,
+      });
+    }
+    render(merged);
   } catch (e) {
     document.getElementById("status").textContent = "Daemon unreachable: " + e.message;
   } finally {
@@ -162,7 +368,7 @@ function render(vms) {
   root.innerHTML = "";
   if (!vms.length) {
     root.appendChild(el("div", { class: "empty" },
-      "No VMs yet. Use ", el("code", null, "bushel pull"), " or ", el("code", null, "bushel create"), " from the CLI."));
+      "No VMs yet. Click ", el("code", null, "+ Create VM"), " to get started."));
     return;
   }
   const grid = el("div", { class: "grid" });
@@ -171,23 +377,40 @@ function render(vms) {
 }
 
 function card(vm) {
+  const pulling = vm.status === "pulling" || activePulls.has(vm.name);
   const running = vm.status === "running";
   const disk = vm.diskSize || {};
   const used = disk.allocated || 0, total = disk.total || 1;
   const pct = Math.min(100, Math.round((used / total) * 100));
 
-  const node = el("div", { class: "vm" + (running ? " running" : "") });
+  const cls = "vm" + (running ? " running" : "") + (pulling ? " pulling" : "");
+  const node = el("div", { class: cls });
   node.appendChild(el("header", null,
     el("h2", null, vm.name),
-    el("span", { class: "badge" + (running ? " running" : "") }, vm.status || "unknown")));
-  node.appendChild(el("dl", null,
-    el("dt", null, "OS"), el("dd", null, vm.os || "—"),
-    el("dt", null, "IP"), el("dd", null, vm.ipAddress || "—"),
-    el("dt", null, "SSH"), el("dd", null, vm.sshAvailable ? "yes" : "no"),
-    el("dt", null, "CPU / RAM"), el("dd", null, `${vm.cpuCount || "?"} cores · ${fmtBytes(vm.memorySize)}`),
-    el("dt", null, "Disk"), el("dd", null,
-      el("div", { class: "bar" }, el("span", { style: `width:${pct}%` })),
-      el("small", null, `${fmtBytes(used)} / ${fmtBytes(total)} (${pct}%)`))));
+    el("span", { class: "badge" + (running ? " running" : "") + (pulling ? " pulling" : "") },
+      vm.status || "unknown")));
+
+  if (pulling) {
+    // Show pull progress instead of disk usage while a pull is in flight.
+    const tracked = activePulls.get(vm.name);
+    const raw = (tracked && typeof tracked.progress === "number") ? tracked.progress
+              : (typeof vm.downloadProgress === "number" ? vm.downloadProgress : 0);
+    const pullPct = Math.max(0, Math.min(100, Math.round(raw * 100)));
+    node.appendChild(el("dl", null,
+      el("dt", null, "Image"), el("dd", null, vm.os || "—"),
+      el("dt", null, "Progress"), el("dd", null,
+        el("div", { class: "bar pull" }, el("span", { style: `width:${pullPct}%` })),
+        el("small", null, `${pullPct}%`))));
+  } else {
+    node.appendChild(el("dl", null,
+      el("dt", null, "OS"), el("dd", null, vm.os || "—"),
+      el("dt", null, "IP"), el("dd", null, vm.ipAddress || "—"),
+      el("dt", null, "SSH"), el("dd", null, vm.sshAvailable ? "yes" : "no"),
+      el("dt", null, "CPU / RAM"), el("dd", null, `${vm.cpuCount || "?"} cores · ${fmtBytes(vm.memorySize)}`),
+      el("dt", null, "Disk"), el("dd", null,
+        el("div", { class: "bar" }, el("span", { style: `width:${pct}%` })),
+        el("small", null, `${fmtBytes(used)} / ${fmtBytes(total)} (${pct}%)`))));
+  }
 
   // Optional metadata block (creator / owner / description). Only render rows
   // that have a value, so VMs with no metadata don't grow a header-shaped
@@ -212,6 +435,13 @@ function card(vm) {
   }
 
   const footer = el("footer", null);
+  if (pulling) {
+    // No actions while a pull is in flight; the card is informational only.
+    // Once the pull completes activePulls is cleared and the next refresh
+    // gives the real card with Start/Edit/etc.
+    node.appendChild(footer);
+    return node;
+  }
   if (running) {
     // Browser-based noVNC viewer (served by this same daemon). Opens in a
     // new tab so the dashboard stays usable while watching the VM's screen.
@@ -228,10 +458,15 @@ function card(vm) {
     }
     footer.appendChild(el("a", { class: "btn primary", href: vncHref, target: "_blank", rel: "noopener" }, "Open VNC"));
     if (vm.vncUrl) footer.appendChild(el("a", { class: "btn", href: vm.vncUrl, title: "Open in native VNC viewer (Screen Sharing.app on macOS)" }, "vnc://"));
+    if (vm.sshAvailable && vm.ipAddress) {
+      footer.appendChild(button("Copy SSH", () => copySSH(vm.ipAddress)));
+    }
     footer.appendChild(button("Stop", () => mutate(`/lume/vms/${encodeURIComponent(vm.name)}/stop`, "POST", `Stopped ${vm.name}`)));
   } else {
     footer.appendChild(button("Start", () => mutate(`/lume/vms/${encodeURIComponent(vm.name)}/run`, "POST", `Starting ${vm.name}`), "primary"));
   }
+  footer.appendChild(button("Edit settings", () => openEditDialog(vm)));
+  footer.appendChild(button("Clone", () => openCloneDialog(vm)));
   footer.appendChild(button("Edit", () => openMetadataDialog(vm)));
   footer.appendChild(button("Delete", () => {
     if (!confirm(`Delete VM '${vm.name}'? This cannot be undone.`)) return;
@@ -241,11 +476,42 @@ function card(vm) {
   return node;
 }
 
-// Open the Edit-metadata dialog, prefilled with the current VM's metadata.
-// One dialog is re-used across all cards; the VM name is stashed in
-// dataset.vmName so the submit handler knows where to PUT. The form is
-// :focused on opening so the existing "pause refresh while input focused"
-// wiring kicks in.
+// ---------------------------------------------------------------------------
+// Dialog helpers
+// ---------------------------------------------------------------------------
+
+// Mark the body so the refresh tick bails while any dialog is up. The
+// previous version only checked metadata-dialog.open; we now check a
+// data-modal-open attribute so adding a new dialog Just Works.
+function openDialog(id) {
+  const dialog = document.getElementById(id);
+  if (!dialog) return;
+  dialog.showModal();
+  document.body.dataset.modalOpen = id;
+}
+function closeDialog(id) {
+  const dialog = document.getElementById(id);
+  if (dialog) dialog.close();
+  if (document.body.dataset.modalOpen === id) delete document.body.dataset.modalOpen;
+}
+
+// Wire data-close-dialog="<id>" buttons (Cancel) once.
+document.querySelectorAll("[data-close-dialog]").forEach(b => {
+  b.addEventListener("click", () => closeDialog(b.getAttribute("data-close-dialog")));
+});
+// Clear modal-open on backdrop click / Esc close (the close event fires for
+// either path).
+for (const id of ["dlg-edit", "dlg-clone", "dlg-create"]) {
+  const d = document.getElementById(id);
+  if (d) d.addEventListener("close", () => {
+    if (document.body.dataset.modalOpen === id) delete document.body.dataset.modalOpen;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Edit-metadata dialog (existing — kept as-is, just wired into openDialog)
+// ---------------------------------------------------------------------------
+
 function openMetadataDialog(vm) {
   const dialog = document.getElementById("metadata-dialog");
   const meta = vm.metadata || {};
@@ -255,7 +521,7 @@ function openMetadataDialog(vm) {
   document.getElementById("metadata-description").value = meta.description || "";
   document.getElementById("metadata-owner").value = meta.owner || "";
   dialog.showModal();
-  // Focus the first field after the dialog renders so refresh pauses.
+  document.body.dataset.modalOpen = "metadata-dialog";
   setTimeout(() => document.getElementById("metadata-creator").focus(), 0);
 }
 
@@ -264,28 +530,20 @@ async function saveMetadata(ev) {
   const dialog = document.getElementById("metadata-dialog");
   const name = dialog.dataset.vmName;
   if (!name) return;
-
-  // Only send non-empty fields — empty inputs become `null` on the wire so
-  // the server's optional fields stay optional, matching what a fresh VM
-  // with no sidecar looks like. JSONDecoder treats missing-keys and null
-  // the same here (both decode to nil).
   const body = {
     creator: document.getElementById("metadata-creator").value.trim() || null,
     description: document.getElementById("metadata-description").value.trim() || null,
     owner: document.getElementById("metadata-owner").value.trim() || null,
   };
-
   try {
     const r = await fetch(`/lume/vms/${encodeURIComponent(name)}/metadata`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!r.ok) {
-      const text = await r.text();
-      throw new Error(text || ("HTTP " + r.status));
-    }
+    if (!r.ok) throw new Error((await r.text()) || ("HTTP " + r.status));
     dialog.close();
+    if (document.body.dataset.modalOpen === "metadata-dialog") delete document.body.dataset.modalOpen;
     flash(`Metadata saved for ${name}`, "ok");
     fetchVMs();
   } catch (e) {
@@ -295,8 +553,341 @@ async function saveMetadata(ev) {
 
 document.getElementById("metadata-form").addEventListener("submit", saveMetadata);
 document.getElementById("metadata-cancel").addEventListener("click", () => {
-  document.getElementById("metadata-dialog").close();
+  closeDialog("metadata-dialog");
 });
+document.getElementById("metadata-dialog").addEventListener("close", () => {
+  if (document.body.dataset.modalOpen === "metadata-dialog") delete document.body.dataset.modalOpen;
+});
+
+// ---------------------------------------------------------------------------
+// Edit-settings dialog (PATCH /lume/vms/:name)
+// ---------------------------------------------------------------------------
+
+function openEditDialog(vm) {
+  const dialog = document.getElementById("dlg-edit");
+  dialog.dataset.vmName = vm.name;
+  // Remember the original values; the submit handler will diff and only
+  // send fields the user actually changed (an empty payload is a no-op).
+  const cpu = vm.cpuCount || "";
+  const mem = bytesToSizeString(vm.memorySize);
+  const total = (vm.diskSize && vm.diskSize.total) || 0;
+  const totalStr = bytesToSizeString(total);
+  dialog.dataset.origCpu = String(cpu);
+  dialog.dataset.origMemory = mem;
+  dialog.dataset.origDisk = totalStr;
+  dialog.dataset.origDiskBytes = String(total);
+
+  document.getElementById("edit-vm-name").textContent = vm.name;
+  document.getElementById("edit-cpu").value = cpu;
+  document.getElementById("edit-memory").value = mem;
+  document.getElementById("edit-disk").value = totalStr;
+  document.getElementById("edit-disk").placeholder = totalStr || "e.g. 40GB";
+  document.getElementById("edit-display").value = "";
+  openDialog("dlg-edit");
+  setTimeout(() => document.getElementById("edit-cpu").focus(), 0);
+}
+
+document.getElementById("edit-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const dialog = document.getElementById("dlg-edit");
+  const name = dialog.dataset.vmName;
+  if (!name) return;
+  const body = {};
+  const cpuVal = document.getElementById("edit-cpu").value.trim();
+  if (cpuVal && cpuVal !== dialog.dataset.origCpu) body.cpu = parseInt(cpuVal, 10);
+  const memVal = document.getElementById("edit-memory").value.trim();
+  if (memVal && memVal !== dialog.dataset.origMemory) body.memory = memVal;
+  const diskVal = document.getElementById("edit-disk").value.trim();
+  if (diskVal && diskVal !== dialog.dataset.origDisk) body.diskSize = diskVal;
+  const displayVal = document.getElementById("edit-display").value;
+  if (displayVal) body.display = displayVal;
+
+  if (Object.keys(body).length === 0) {
+    closeDialog("dlg-edit");
+    return;
+  }
+
+  try {
+    const r = await fetch(`/lume/vms/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error((await r.text()) || ("HTTP " + r.status));
+    closeDialog("dlg-edit");
+    flash(`Settings updated for ${name}`, "ok");
+    fetchVMs();
+  } catch (e) {
+    flash("Failed: " + e.message, "err");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Clone dialog (POST /lume/vms/clone)
+// ---------------------------------------------------------------------------
+
+function openCloneDialog(vm) {
+  const dialog = document.getElementById("dlg-clone");
+  dialog.dataset.vmName = vm.name;
+  document.getElementById("clone-source").value = vm.name;
+  document.getElementById("clone-new-name").value = "";
+  document.getElementById("clone-source-location").value = "";
+  document.getElementById("clone-dest-location").value = "";
+  openDialog("dlg-clone");
+  setTimeout(() => document.getElementById("clone-new-name").focus(), 0);
+}
+
+document.getElementById("clone-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const dialog = document.getElementById("dlg-clone");
+  const source = dialog.dataset.vmName;
+  const newName = document.getElementById("clone-new-name").value.trim();
+  if (!source || !newName) return;
+  const body = { name: source, newName };
+  const srcLoc = document.getElementById("clone-source-location").value.trim();
+  const dstLoc = document.getElementById("clone-dest-location").value.trim();
+  if (srcLoc) body.sourceLocation = srcLoc;
+  if (dstLoc) body.destLocation = dstLoc;
+  try {
+    const r = await fetch("/lume/vms/clone", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error((await r.text()) || ("HTTP " + r.status));
+    closeDialog("dlg-clone");
+    flash(`Cloned ${source} → ${newName}`, "ok");
+    fetchVMs();
+  } catch (e) {
+    flash("Failed: " + e.message, "err");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Create-VM dialog (tabbed: Linux / Pull / macOS)
+// ---------------------------------------------------------------------------
+
+document.getElementById("create-vm-btn").addEventListener("click", () => {
+  setCreateTab("linux");
+  openDialog("dlg-create");
+  setTimeout(() => document.getElementById("create-linux-name").focus(), 0);
+});
+
+function setCreateTab(name) {
+  const dialog = document.getElementById("dlg-create");
+  dialog.dataset.tab = name;
+  dialog.querySelectorAll(".tabs button").forEach(b => {
+    b.classList.toggle("active", b.getAttribute("data-tab") === name);
+  });
+  dialog.querySelectorAll(".tab-panel").forEach(p => {
+    p.classList.toggle("active", p.getAttribute("data-tab-panel") === name);
+  });
+}
+
+document.querySelectorAll("#dlg-create .tabs button").forEach(b => {
+  b.addEventListener("click", () => setCreateTab(b.getAttribute("data-tab")));
+});
+
+// Toggle the custom-IPSW input when "Custom path…" is selected.
+document.getElementById("create-macos-ipsw-source").addEventListener("change", (ev) => {
+  document.getElementById("create-macos-ipsw-custom-wrap").style.display =
+    ev.target.value === "custom" ? "" : "none";
+});
+
+// Suggest stripping the :tag from the image when the user tabs out and the
+// name field is still empty (matches the lume-web-vm-manager UX). Skipped
+// if the user already typed something.
+document.getElementById("create-pull-image").addEventListener("change", (ev) => {
+  const nameInput = document.getElementById("create-pull-name");
+  if (nameInput.value.trim()) return;
+  const img = ev.target.value.trim();
+  if (!img) return;
+  const base = img.split(":")[0].split("/").pop();
+  nameInput.value = base;
+});
+
+document.getElementById("create-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const tab = document.getElementById("dlg-create").dataset.tab || "linux";
+  if (tab === "linux") return submitCreateLinux();
+  if (tab === "pull") return submitCreatePull();
+  if (tab === "macos") return submitCreateMacOS();
+});
+
+async function submitCreateLinux() {
+  const name = document.getElementById("create-linux-name").value.trim();
+  if (!name) { flash("Name is required", "err"); return; }
+  const body = {
+    name,
+    os: "linux",
+    cpu: parseInt(document.getElementById("create-linux-cpu").value, 10) || 4,
+    memory: document.getElementById("create-linux-memory").value.trim() || "4GB",
+    diskSize: document.getElementById("create-linux-disk").value.trim() || "20GB",
+    display: "1024x768",
+  };
+  try {
+    const r = await fetch("/lume/vms", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error((await r.text()) || ("HTTP " + r.status));
+    closeDialog("dlg-create");
+    flash(`Creating ${name}…`, "ok");
+    fetchVMs();
+  } catch (e) {
+    flash("Failed: " + e.message, "err");
+  }
+}
+
+async function submitCreatePull() {
+  const image = document.getElementById("create-pull-image").value.trim();
+  if (!image) { flash("Image is required", "err"); return; }
+  const nameInput = document.getElementById("create-pull-name").value.trim();
+  // Mirror handlePullStart's default-name logic so the card we render
+  // matches the name the daemon will track. (handlePullStart uses
+  // image.split(":")[0] when name is omitted.)
+  const name = nameInput || image.split(":")[0].split("/").pop();
+  const body = {
+    image,
+    name: name,
+    registry: document.getElementById("create-pull-registry").value.trim() || "ghcr.io",
+    organization: document.getElementById("create-pull-organization").value.trim() || "trycua",
+  };
+  try {
+    const r = await fetch("/lume/pull/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error((await r.text()) || ("HTTP " + r.status));
+    closeDialog("dlg-create");
+    flash(`Pulling ${image} as ${name}…`, "ok");
+    // Start tracking so a synthetic card renders until the real one shows up.
+    activePulls.set(name, { progress: 0, state: "pulling" });
+    schedulePullPoll(name);
+    fetchVMs();
+  } catch (e) {
+    flash("Failed: " + e.message, "err");
+  }
+}
+
+async function submitCreateMacOS() {
+  const name = document.getElementById("create-macos-name").value.trim();
+  if (!name) { flash("Name is required", "err"); return; }
+  const ipswSrc = document.getElementById("create-macos-ipsw-source").value;
+  const ipsw = ipswSrc === "custom"
+    ? document.getElementById("create-macos-ipsw-custom").value.trim()
+    : "latest";
+  if (!ipsw) { flash("IPSW path is required for custom", "err"); return; }
+  const unattended = document.getElementById("create-macos-unattended").value;
+  const body = {
+    name,
+    os: "macOS",
+    cpu: parseInt(document.getElementById("create-macos-cpu").value, 10) || 4,
+    memory: document.getElementById("create-macos-memory").value.trim() || "8GB",
+    diskSize: document.getElementById("create-macos-disk").value.trim() || "64GB",
+    display: "1024x768",
+    ipsw,
+  };
+  if (unattended && unattended !== "none") body.unattended = unattended;
+  try {
+    const r = await fetch("/lume/vms", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error((await r.text()) || ("HTTP " + r.status));
+    closeDialog("dlg-create");
+    flash(`Creating ${name}…`, "ok");
+    fetchVMs();
+  } catch (e) {
+    flash("Failed: " + e.message, "err");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pull progress polling
+// ---------------------------------------------------------------------------
+
+// GET /lume/vms/:name returns {status:"pulling", downloadProgress: 0..1}
+// while a pull is in flight, or the normal details once the VM is on disk.
+// Poll every 2s until we see a non-pulling status or an error response.
+function schedulePullPoll(name) {
+  setTimeout(() => pollPullOnce(name), PULL_POLL_MS);
+}
+
+async function pollPullOnce(name) {
+  const tracked = activePulls.get(name);
+  if (!tracked) return; // stopped externally
+  try {
+    const r = await fetch(`/lume/vms/${encodeURIComponent(name)}`, {
+      headers: { Accept: "application/json" },
+    });
+    if (!r.ok) {
+      // 4xx with the "Pull failed for …" surface means it errored.
+      const text = await r.text();
+      tracked.state = "error";
+      tracked.error = text;
+      activePulls.delete(name);
+      flash(`Pull failed for ${name}: ${text}`, "err");
+      fetchVMs();
+      return;
+    }
+    const data = await r.json();
+    if (data && data.status === "pulling") {
+      const p = typeof data.downloadProgress === "number" ? data.downloadProgress : tracked.progress;
+      tracked.progress = p;
+      activePulls.set(name, tracked);
+      // Re-render so the card's progress bar moves between full /lume/vms ticks.
+      fetchVMs();
+      schedulePullPoll(name);
+    } else {
+      // Pull completed (or the VM moved past "pulling"). Stop tracking.
+      tracked.state = "complete";
+      activePulls.delete(name);
+      flash(`Pulled ${name}`, "ok");
+      fetchVMs();
+    }
+  } catch (e) {
+    // Transient network blip — retry rather than aborting.
+    schedulePullPoll(name);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Copy SSH
+// ---------------------------------------------------------------------------
+
+// Hard-coded "lume" user matches the legacy lume-web-vm-manager. macOS
+// unattended VMs use lume/lume; Linux images vary, but lume is the right
+// guess for the bundled trycua images. v1 — make it configurable later if
+// people ask.
+async function copySSH(ip) {
+  const cmd = `ssh lume@${ip}`;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(cmd);
+    } else {
+      // Fallback for older browsers / non-secure contexts.
+      const ta = document.createElement("textarea");
+      ta.value = cmd;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    flash(`Copied: ${cmd}`, "ok");
+  } catch (e) {
+    flash("Failed to copy: " + e.message, "err");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Misc
+// ---------------------------------------------------------------------------
 
 function button(label, onClick, klass) {
   return el("button", { class: "btn" + (klass ? " " + klass : ""), onclick: onClick }, label);
@@ -316,14 +907,12 @@ async function mutate(url, method, okMsg) {
   }
 }
 
-// Pause refresh while user is typing in a form or has the Edit dialog open.
-// Without the dialog check, the dialog stays open visually but a refresh tick
-// would still rebuild the cards underneath and the next focus shift could
-// drop the user back into a stale UI. Matches the lume-web-vm-manager
-// behaviour so future dialog/forms work cleanly.
+// Pause refresh while user is typing in a form or has any dialog open.
+// Each dialog sets document.body.dataset.modalOpen on open and clears it
+// on close, so a single check covers all of them — adding a new dialog
+// doesn't require touching this function.
 function shouldRefresh() {
-  const dialog = document.getElementById("metadata-dialog");
-  if (dialog && dialog.open) return false;
+  if (document.body.dataset.modalOpen) return false;
   const t = document.activeElement;
   if (!t) return true;
   const tag = (t.tagName || "").toLowerCase();
