@@ -20,7 +20,7 @@ extension Lume {
         // NOTE: Source of truth for `bushel --version`. Must be kept in sync
         // with the VERSION file at repo root. A build-time injection step
         // would deduplicate this; deferred for now.
-        static let current: String = "0.4.0-bushel.18"
+        static let current: String = "0.4.0-bushel.19"
     }
 }
 
