@@ -1,89 +1,149 @@
-# Bushel
+```
+ ██████╗ ██╗   ██╗███████╗██╗  ██╗███████╗██╗
+ ██╔══██╗██║   ██║██╔════╝██║  ██║██╔════╝██║
+ ██████╔╝██║   ██║███████╗███████║█████╗  ██║
+ ██╔══██╗██║   ██║╚════██║██╔══██║██╔══╝  ██║
+ ██████╔╝╚██████╔╝███████║██║  ██║███████╗███████╗
+ ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝
+```
 
-CLI and framework for macOS and Linux VMs using Apple Virtualization Framework. Apple Silicon only.
+<p align="center"><strong>Apple Silicon macOS &amp; Linux VMs — fully drivable by AI agents over MCP.</strong></p>
 
-## What is bushel?
+<p align="center">
+  <a href="LICENSE.md"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-yellow.svg"></a>
+  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20arm64-blue">
+  <a href="https://github.com/orzelig/bushel/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/orzelig/bushel"></a>
+  <a href="https://orzelig.github.io/givebackai/"><img alt="GiveBackAI partner" src="https://img.shields.io/badge/contribute%20via-GiveBackAI-7057ff"></a>
+</p>
 
-Bushel is a maintained fork of [lume](https://github.com/trycua/cua/tree/main/libs/lume), extracted from the [trycua/cua](https://github.com/trycua/cua) monorepo via `git filter-repo --subdirectory-filter libs/lume` (history preserved). It carries fixes ahead of upstream:
+---
 
-- [trycua/cua#1395](https://github.com/trycua/cua/pull/1395) — `pull macos-*` now correctly assembles 21 GB OCI tar-part disk images
-- [trycua/cua#1441](https://github.com/trycua/cua/pull/1441) — `create --unattended` Tahoe preset works on macOS 26's renamed Setup Assistant buttons
+Bushel is a Swift CLI + daemon for spinning up macOS and Linux VMs on Apple Silicon. What makes it different: **24 MCP tools** that let Claude (or any MCP client) drive a VM end-to-end — start, snapshot, exec a shell, see the screen, click, type. A maintained fork of [lume](https://github.com/trycua/cua/tree/main/libs/lume) carrying fixes ahead of upstream.
 
-See [UPSTREAM-STATUS.md](UPSTREAM-STATUS.md) for the full relationship to upstream — provenance, vendored PRs, and open PRs under evaluation.
-
-## Install
-
-### Tell Claude to install it
-
-If you have Claude Code, just tell it:
-
-> Install bushel from https://github.com/orzelig/bushel — read INSTALL_FOR_CLAUDE.md first.
-
-Claude will fetch [INSTALL_FOR_CLAUDE.md](INSTALL_FOR_CLAUDE.md), run the install script, and (if you're in Claude Code) wire bushel into itself via `bushel claude-setup`. Restart Claude when done and say *"Start using bushel."*
-
-### Or install it yourself
+## Quick start
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/orzelig/bushel/main/scripts/install.sh)"
 ```
 
-Installs the `bushel` binary to `~/.local/bin/bushel` and registers a LaunchAgent (`io.github.orzelig.bushel.daemon`) for `bushel serve` on `127.0.0.1:7777`. Apple Silicon only. No telemetry, no auto-update by default.
+Installs `bushel` to `~/.local/bin`, registers a LaunchAgent serving the daemon on `127.0.0.1:7777`, and exits. No telemetry. No cloud. Apple Silicon only.
 
-A web dashboard ships built-in: with the daemon running, open <http://127.0.0.1:7777/> in a browser. Lists VMs, starts/stops them, refreshes every 5 s. No separate `pip install` or `python3 server.py` step.
+Verify:
 
-**Browser-based VNC**: open <http://127.0.0.1:7777/vnc/&lt;vm-name&gt;> for an in-browser noVNC viewer of a running VM — no Screen Sharing.app required. The bundled [noVNC](https://github.com/novnc/noVNC) client connects to a WebSocket bridge in the daemon (`/vnc/<name>/ws`) that proxies RFB bytes to the VM's VNC port. AI agents can call `lume_open_vnc` to get the URL on demand.
+```bash
+bushel host-status                  # confirms daemon is up + Virtualization.framework available
+open http://127.0.0.1:7777/         # web dashboard
+```
 
-To upgrade: `bushel update` (or `bushel update --check-only` to just see what's available). SHA-256 is verified against the published sidecar before any files are swapped, and the daemon is stopped and restarted around the swap. A daily LaunchAgent surfaces a macOS notification when an update lands; updates never auto-apply.
+Pull and start a macOS VM:
 
-For a menu-bar status icon (open the dashboard, start/stop the daemon, see VM count at a glance), pass `--menubar` to `install.sh`. It registers a separate LaunchAgent (`io.github.orzelig.bushel.menubar`) that autostarts at login.
+```bash
+bushel pull macos-sequoia-vanilla:latest my-vm
+bushel start my-vm
+```
 
-To uninstall: `bash <(curl -fsSL https://raw.githubusercontent.com/orzelig/bushel/main/scripts/uninstall.sh)`. User data in `~/.lume` and `~/.config/lume` is preserved unless you pass `--purge`.
+> [!TIP]
+> **Have Claude Code open?** Skip the install command. Just tell Claude:
+>
+> > Install bushel from https://github.com/orzelig/bushel — read INSTALL_FOR_CLAUDE.md first.
+>
+> Claude will fetch [INSTALL_FOR_CLAUDE.md](INSTALL_FOR_CLAUDE.md), run the installer, and wire bushel into itself as an MCP server in one step. Restart Claude and say *"Start using bushel."*
 
-### Build from source
+## What you get
+
+| | |
+|---|---|
+| **CLI** | `bushel create / clone / start / stop / exec / pull / snapshot / set …` — full lume CLI, plus extras |
+| **Local daemon** | LaunchAgent on `127.0.0.1:7777`. Loopback-only. Restart-safe |
+| **Web dashboard** | Open the daemon URL. List, create, clone, edit metadata, watch pull progress, start/stop. Refreshes every 5s |
+| **Browser VNC** | `http://127.0.0.1:7777/vnc/<name>` — [noVNC](https://github.com/novnc/noVNC) viewer with clipboard bridge. No Screen Sharing.app |
+| **MCP server** | 24 tools for AI agents: lifecycle, snapshots, file transfer, **screen capture / click / type / paste**, exec, pull |
+| **Snapshots & clones** | APFS copy-on-write — almost free. Safe "snapshot + clone" pattern for iterating on Setup Assistant automation |
+| **Per-VM metadata** | Creator / description / owner annotations stored sidecar-style, editable in the dashboard |
+| **Auto-update** | Opt-in. Daily check, notification on availability, SHA-256 verification, codesigned binary, never auto-applies |
+
+## Use with AI
+
+The MCP integration is one command:
+
+```bash
+bushel claude-setup
+```
+
+Detects Claude Desktop and Claude Code on your machine, registers bushel as an MCP server in each. Idempotent. Use `--dry-run` to preview, `--print-only` for a manual-paste snippet.
+
+Restart Claude, then say *"Start using bushel."* Claude can now:
+
+- **Manage** VMs — list, get info, create, clone, delete, start, stop, wait-for-boot
+- **Pull** macOS or Linux images from the OCI registry (with progress polling)
+- **Exec** shell commands in a running guest, get stdout/stderr/exit
+- **Transfer files** in and out via `lume_get_file` / `lume_put_file`
+- **Snapshot** before risky changes, restore on failure — fully scriptable
+- **Drive the GUI** — `lume_screen_capture` (PNG of the desktop), `lume_screen_click` (x,y or by image template), `lume_screen_type`, `lume_screen_paste`
+- **Open VNC** — `lume_open_vnc` returns the noVNC URL for a human to look at
+
+That last cluster is what makes bushel different from upstream lume: an AI agent can *see* and *interact with* the VM screen, not just shell into it.
+
+## Cheat sheet
+
+```bash
+bushel list                                    # all VMs
+bushel pull macos-tahoe-vanilla:latest tahoe   # download image
+bushel create my-vm --os macos --ipsw latest --unattended
+bushel start my-vm                             # boot in background
+bushel exec my-vm "sw_vers"                    # run command in guest
+bushel snapshot create my-vm before-test       # cheap APFS snapshot
+bushel clone my-vm experiment-1                # COW clone
+bushel set my-vm --disk-size 200               # grow disk (in GB)
+bushel stop my-vm                              # graceful shutdown
+bushel delete experiment-1                     # remove a VM
+bushel update                                  # upgrade bushel itself
+bushel update --check-only                     # just check, no swap
+```
+
+Default credentials in unattended-built VMs: **`lume` / `lume`** (baked into the image, not the binary).
+
+Build from source:
 
 ```bash
 swift build -c release
 .build/arm64-apple-macosx/release/bushel --help
 ```
 
-## Use with Claude
-
-If you already have Claude Code open, just tell it:
-
-> Run `bushel claude-setup`, then I'll restart you.
-
-Claude will execute the command via its Bash tool. Otherwise, run it yourself:
-
-```bash
-bushel claude-setup
-```
-
-Either way, restart Claude (Desktop and/or Code), then ask:
-
-> Start using bushel.
-
-That's it — Claude can now drive bushel's 10 MCP tools (list/get/start/stop/clone/delete/exec/create VMs, plus pull-image and host-status).
-
-`claude-setup` detects Claude Desktop and Claude Code on your machine and registers bushel as an MCP server in each. It's idempotent — re-running it is a safe no-op when the config is already correct. Use `--dry-run` to preview, or `--print-only` to get the Claude Desktop config snippet for manual paste.
+Menu-bar status icon (open dashboard, see VM count, start/stop daemon): pass `--menubar` to `install.sh`. Uninstall: `bash <(curl -fsSL https://raw.githubusercontent.com/orzelig/bushel/main/scripts/uninstall.sh)` — `--purge` also deletes `~/.lume` data.
 
 ## Compatibility with lume
 
-Bushel renames only the binary. Everything else is wire-compatible with lume:
+Bushel renames the binary only. Everything else is wire-compatible:
 
-- **Daemon endpoint**: `127.0.0.1:7777`, same HTTP routes (`/lume/vms`, `/lume/pull`, …) — existing dashboards and scripts work unchanged
-- **Data layout**: VMs in `~/.lume/`, config in `~/.config/lume/` — switching from lume to bushel finds your existing VMs
-- **MCP tools**: `lume_list_vms`, `lume_create_vm`, … — AI clients with cached tool names keep working
-- **Image registry**: bushel reads and writes images with `org.trycua.lume.*` OCI annotations — fully interoperable with images pushed by lume
-- **VM credentials**: default `lume`/`lume` user inside unattended-built VMs (these are baked into the VM image, not the binary)
+| | bushel | upstream lume |
+|---|---|---|
+| Daemon port | `127.0.0.1:7777` | same |
+| HTTP routes | `/lume/vms`, `/lume/pull`, … | same |
+| Data layout | `~/.lume/`, `~/.config/lume/` | same |
+| MCP tool names | `lume_*` | same |
+| Image registry | OCI w/ `org.trycua.lume.*` annotations | same |
+| LaunchAgent label | `io.github.orzelig.bushel.daemon` | `com.trycua.lume_daemon` |
 
-You can run lume and bushel side by side; their LaunchAgent labels differ (`com.trycua.lume_daemon` vs `io.github.orzelig.bushel.daemon`), but they'll fight over port 7777 — only run one daemon at a time.
+Switching to bushel finds your existing lume VMs. Side-by-side install works, but only one daemon can hold port 7777 — disable lume's LaunchAgent first.
+
+## Contributing
+
+Bushel is a partner on [**GiveBackAI**](https://orzelig.github.io/givebackai/) — you can donate unused Claude quota to fix bushel issues. Browse [issues labeled `givebackai-ready`](https://github.com/orzelig/bushel/issues?q=is%3Aopen+label%3Agivebackai-ready) for self-contained picks.
+
+For bugs and feature requests: open an [issue](https://github.com/orzelig/bushel/issues). For local development: [CONTRIBUTING.md](CONTRIBUTING.md) and [Development.md](Development.md).
 
 ## Documentation
 
-**[Upstream lume documentation](https://cua.ai/docs/lume)** — installation guides, CLI reference, and architecture. Bushel is CLI-compatible; substitute `bushel` for `lume` in command examples.
+- **[INSTALL_FOR_CLAUDE.md](INSTALL_FOR_CLAUDE.md)** — what Claude reads when you ask it to install bushel
+- **[UPSTREAM-STATUS.md](UPSTREAM-STATUS.md)** — vendored PRs, evaluation candidates, known divergences
+- **[Development.md](Development.md)** — local dev setup
+- **[Upstream lume docs](https://cua.ai/docs/lume)** — bushel is CLI-compatible; substitute `bushel` for `lume`
 
 ## Relationship to upstream
 
-Bushel is a maintained fork. We track upstream lume and pull in important developments — bug fixes and meaningful improvements — as they appear. The fork is here to stay: bushel ships fixes ahead of upstream's review cadence, and we'll keep doing so. If upstream merges a PR we've already vendored, the bushel commit reconciles to a no-op rebase.
+Bushel is a maintained fork. We track upstream lume and pull in important developments — bug fixes and meaningful improvements — as they appear. Bushel ships fixes ahead of upstream's review cadence. If upstream merges a PR we've already vendored, the bushel commit reconciles to a no-op rebase. For the current vendored set and open evaluations, see [UPSTREAM-STATUS.md](UPSTREAM-STATUS.md).
 
-For the current vendored set, open PRs under evaluation, and known unaddressed issues, see [UPSTREAM-STATUS.md](UPSTREAM-STATUS.md). For bushel-specific bugs, file an [issue](https://github.com/orzelig/bushel/issues) on this repo; for bugs that exist upstream too, please cross-link the upstream issue.
+## License
+
+MIT — see [LICENSE.md](LICENSE.md). Copyright © 2025 Cua AI, Inc. Bushel modifications are also MIT.
