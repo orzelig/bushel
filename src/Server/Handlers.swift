@@ -997,7 +997,11 @@ extension Server {
         // the VM via LumeController and will fail cleanly if it's bogus —
         // saves us a second name-validation regex.
 
-        guard let url = Bundle.lumeResources.url(forResource: "novnc/vnc", withExtension: "html"),
+        // Use direct-path lookup (Bundle.lumeResource) rather than Foundation's
+        // url(forResource:withExtension:) — the latter has been observed to
+        // return nil intermittently in long-running daemons across macOS
+        // sleep/wake cycles. See Bundle.lumeResourceURL for the full rationale.
+        guard let url = Bundle.lumeResource("novnc/vnc.html"),
               let data = try? Data(contentsOf: url),
               let template = String(data: data, encoding: .utf8)
         else {
@@ -1087,10 +1091,10 @@ extension Server {
 
         // SPM resource bundles preserve directory structure when you .copy()
         // a directory. Bundle.url(forResource:) doesn't take subdirectories
-        // gracefully, so use the bundle's resourceURL directly.
-        guard let bundleURL = Bundle.lumeResources.resourceURL else {
-            return HTTPResponse(statusCode: .internalServerError, body: "Resource bundle missing")
-        }
+        // gracefully, AND has been observed to return nil intermittently in
+        // long-running daemons (see Bundle.lumeResourceURL rationale). Use
+        // the direct-path constant instead.
+        let bundleURL = Bundle.lumeResourceURL
         let fileURL = bundleURL.appendingPathComponent("novnc").appendingPathComponent(assetPath)
 
         // Confirm the resolved path is still inside the novnc directory —
@@ -1141,7 +1145,11 @@ extension Server {
     /// server or LUME_DAEMON_URL configuration is needed. Replaces the
     /// "install lume-web-vm-manager separately" friction with one curl-bash.
     func handleDashboard() async throws -> HTTPResponse {
-        guard let url = Bundle.lumeResources.url(forResource: "dashboard", withExtension: "html"),
+        // Direct-path lookup; bypasses Foundation's flaky url(forResource:)
+        // cache, which has surfaced "dashboard.html missing from resource
+        // bundle" 500s in clusters after macOS sleep/wake on long-running
+        // daemons. See Bundle.lumeResourceURL.
+        guard let url = Bundle.lumeResource("dashboard.html"),
               let data = try? Data(contentsOf: url)
         else {
             Logger.error("dashboard.html missing from resource bundle")

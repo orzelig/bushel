@@ -87,11 +87,10 @@ struct UnattendedConfig: Codable, Sendable {
 
     /// Load a built-in preset by name
     static func loadPreset(name: String) throws -> UnattendedConfig {
-        guard let url = Bundle.lumeResources.url(
-            forResource: name,
-            withExtension: "yml",
-            subdirectory: "unattended-presets"
-        ) else {
+        // Direct-path lookup; same rationale as the HTTP handlers (see
+        // Bundle.lumeResourceURL — Foundation's url(forResource:) has been
+        // observed to return nil intermittently on long-running daemons).
+        guard let url = Bundle.lumeResource("unattended-presets/\(name).yml") else {
             throw UnattendedConfigError.presetNotFound(name)
         }
 
@@ -101,18 +100,16 @@ struct UnattendedConfig: Codable, Sendable {
 
     /// Check if a name is a known preset
     static func isPreset(name: String) -> Bool {
-        return Bundle.lumeResources.url(
-            forResource: name,
-            withExtension: "yml",
-            subdirectory: "unattended-presets"
-        ) != nil
+        return Bundle.lumeResource("unattended-presets/\(name).yml") != nil
     }
 
     /// List all available preset names
     static func availablePresets() -> [String] {
-        guard let resourceURL = Bundle.lumeResources.url(forResource: "unattended-presets", withExtension: nil),
-              let contents = try? FileManager.default.contentsOfDirectory(at: resourceURL, includingPropertiesForKeys: nil)
-        else {
+        let presetsDir = Bundle.lumeResourceURL.appendingPathComponent("unattended-presets")
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: presetsDir,
+            includingPropertiesForKeys: nil
+        ) else {
             return []
         }
 
